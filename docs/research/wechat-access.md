@@ -34,8 +34,12 @@ own date or the GitHub `pushed_at`.
    it receives every new message live while online **[V]**. Poll the decrypted DB (WAL-aware) on a
    short interval — mature tools already do 500 ms–3 s incremental decryption **[V]** — to emit
    (sender, chat, content, media ref) events. This is the notification pipeline.
-3. **Send (goal 3, optional):** UI-automation of the same desktop client (wxauto / wxauto4 on
-   Windows; xdotool/geometry-based automation on Linux). Lowest ban risk of the send options **[V]**.
+3. **Send (goal 3, optional):** UI-automation of the same desktop client. Lowest ban risk of the
+   send options **[V]**, but the weakest link in the plan: on Windows the free `wxauto` only works
+   on WeChat **3.9.x** (maintenance stopped 2025-10 when 4.0.5 moved to Qt Quick and UIAutomation
+   sees only an empty shell window), `wxauto4` is marked 停止更新 (no longer updated), and only the
+   **paid beta `wxautox4`** (4.0.5 only) targets 4.x **[V]**. macOS AppleScript/Accessibility and
+   Linux xdotool coordinate clicking are the remaining routes; both untested here (see D.1, D.5, D.6).
 4. **Fallback / redundancy for notify:** Android **NotificationListenerService** on the vivo phone
    (Tasker/MacroDroid/custom app) forwards incoming-message notifications. Sees sender + chat +
    text snippet but not muted chats, and media shows only "[图片]/[语音]" placeholders **[V]**.
@@ -94,9 +98,10 @@ people and (as of now) not group chats **[V]**. It does not meet goals 1–2.
 
 | Approach | Tool | Platform / WeChat ver | Receive (listen) | Send text/img/file/sticker | Needs visible desktop | Maintenance | Ban risk |
 |---|---|---|---|---|---|---|---|
-| UI automation | `cluic/wxauto` | Win, default 3.9.11.17 | Yes (poll UI) | text/img/file/emoji | Yes | 7.3k★ Apache-2.0, pushed 2026-04-13 **[V]** | **Low** |
-| UI automation | `cluic/wxauto4` + `wxautox4`(pypi) | Win 4.0.5 (beta) | Yes (AddListenChat) | text/img/file | Yes | wxauto4 226★ (2025-10-27); wxautox4 v41.2.1 2026-09-23 **[V]** | Low |
-| UI automation (paid) | `wxautox`/Plus | Win 3.9.x/4.x | Yes (better) | + more | Yes | activation code, 1-yr updates **[V]** | Low |
+| UI automation | `cluic/wxauto` | Win, **3.9.x only** (default 3.9.11.17) | Yes (poll UI) | text/img/file/emoji | Yes | 7.3k★ Apache-2.0, pushed 2026-04-13; maintenance stopped 2025-10, does not work on 4.x **[V]** | **Low** |
+| UI automation | `cluic/wxauto4` | Win 4.0 | — | — | Yes | 226★; marked **停止更新 / no longer updated** **[V]** | Low |
+| UI automation (paid) | `wxautox4` (pypi) | Win **4.0.5 only**, beta | Yes (multithreaded listen) | text/files | Yes | v41.2.1 2026-09-23; license-key activation **[V]** | Low |
+| UI automation (paid) | `wxautox`/Plus | Win 3.9.x | Yes (better) | + more | Yes | activation code, 1-yr updates **[V]** | Low |
 | UI automation (send only) | `LAVARONG/wechat-automation-api` | Win 4.0+ (Qt) & 3.x | No (send only) | text/img | Yes | Flask+uiautomation, openclaw skill **[V]** | Low |
 | UI automation | Linux xdotool/geometry (`oppositenum/wxbot`) | **Linux** WeChat 4.1.1 (Docker+VNC) | Yes, poll decrypted DB ~10 s → sub-second via WAL | via xdotool | Yes (X in container) | new/tiny (2026-09) **[V]** | Low-med |
 | macOS AppleScript | `x5iu/wemac`, `ahaduoduoduo/openclaw-wechat-plugin` | macOS 3.0+ | via native notif + webhook | AppleScript UI | Yes | community **[V]** | Low |
@@ -269,10 +274,22 @@ server and do incremental decryption (500 ms–3 s) with push (to clawbot/Hermes
 - `cluic/wxauto` (7.3k★, Apache-2.0): Win10/11/Server, default WeChat **3.9.11.17**; listen for new
   messages (`AddListenChat`/`GetListenMessage`), send text/img/file/emoji; get history. Requires a
   visible, logged-in desktop (UIAutomation); no minimize; RDP/lock-screen needs handling.
-- `wxauto4` (226★) + `wxautox4` (pypi, v41.2.1 2026-09-23) target **WeChat 4.0.5**, **beta**,
-  partial features. `wxautox`/Plus is paid (activation code, 1-yr updates), smoother (often no mouse
-  movement), adds features. Explicitly **non-hook/non-protocol** → **low ban risk**; won't do
-  transfers/red packets.
+- **WeChat 4.x breaks UIAutomation [V]:** 4.0.5 migrated from Qt Widgets to Qt Quick/QML, controls
+  no longer have HWNDs and are drawn onto one OpenGL canvas, so UIA "can only see an empty shell
+  window" (yage.ai feasibility survey, 2026-03-27). Consequently `wxauto` stopped maintenance in
+  2025-10 and stays 3.9.x-only; `cluic/wxauto4` (226★) carries a **停止更新 / no longer updated**
+  notice (checked 2026-09-27).
+- `wxautox4` (pypi, v41.2.1 2026-09-23) is the **paid** 4.x path: "仅适用于微信 4.0.5 版本客户端"
+  (4.0.5 only), "当前为 4.0 Beta 版本" with no stability guarantee, license-key activation;
+  multithreaded message listening, `SendMsg`, `SendFiles` **[V]**. `wxautox`/Plus for 3.9.x is
+  likewise paid (activation code, 1-yr updates). Both are explicitly **non-hook/non-protocol** →
+  **low ban risk**; won't do transfers/red packets.
+- Survey-recommended alternatives on 4.x Windows: screenshot + OCR + coordinate clicking for
+  send (visible content only), and DB decryption for reading **[V]**. `LAVARONG/wechat-automation-api`
+  claims 4.0+ send support but the survey calls its long-term reliability doubtful **[U]**.
+- Practical implication: if UI-automated sending matters, either pin a Windows VM to WeChat
+  **3.9.x** for `wxauto` (older client, may be force-upgraded), pay for `wxautox4` on 4.0.5, or use
+  macOS Accessibility (D.5) / Linux xdotool (D.6). Test before committing to any of them.
 - Real-time caveat: pure UI polling isn't truly instant and can miss bursts; pairing wxauto (send)
   with DB polling (receive) is more robust than wxauto for both.
 
@@ -445,6 +462,7 @@ DB / key extraction:
 Automation / send-receive:
 - wxauto — https://github.com/cluic/wxauto ; docs https://docs.wxauto.org/ ; wxauto4 https://github.com/cluic/wxauto4 ; wxautox4 https://pypi.org/project/wxautox4/
 - LAVARONG/wechat-automation-api — https://github.com/LAVARONG/wechat-automation-api
+- WeChat UIA feasibility survey (4.0 Qt Quick, OCR fallback) — https://yage.ai/share/wechat-uia-platform-feasibility-survey-en-20260327.html
 - oppositenum/wxbot (Linux) — https://github.com/oppositenum/wxbot
 - WeChatFerry — https://github.com/lich0821/WeChatFerry (archived) ; 风控 issue https://github.com/lich0821/WeChatFerry/issues/422
 - wxhelper — https://github.com/ttttupup/wxhelper ; aixed/WeChat-Hook — https://github.com/aixed/WeChat-Hook
