@@ -84,3 +84,23 @@ def test_misc_store_methods(store, sample_message):
     assert store.events()[0]["id"] == eid
     c = store.counts()
     assert c["messages"] == 1 and c["memories"] == 1 and c["events"] == 1
+
+
+def test_preview_is_clamped_to_200(store, sample_message):
+    cid = store.upsert_conversation("email", "k1", "Hi", "thread")
+    sid = store.upsert_identity("email", "s@x.org", None)
+    store.upsert_message(cid, dataclasses.replace(sample_message, preview="y" * 500), sid)
+    assert len(store.messages_for(cid)[0]["preview"]) == 200
+
+
+def test_conversation_bulk_follows_messages(store, sample_message):
+    cid = store.upsert_conversation("email", "k1", "Hi", "thread")
+    sid = store.upsert_identity("email", "s@x.org", None)
+    store.upsert_message(cid, dataclasses.replace(sample_message, bulk=True), sid)
+    assert store.conversations()[0:1] == [] and len(store.conversations(exclude_bulk=False)) == 1
+    assert store.conversations(exclude_bulk=False)[0]["bulk"] == 1
+    other = dataclasses.replace(
+        sample_message, bulk=False, message_id="<m8@x.org>", ref=dataclasses.replace(sample_message.ref, uid="8")
+    )
+    store.upsert_message(cid, other, sid)
+    assert store.conversations()[0]["bulk"] == 0

@@ -199,7 +199,7 @@ class Store:
                 msg.sent_at,
                 msg.kind,
                 msg.subject,
-                msg.preview or make_preview(msg.text),
+                make_preview(msg.preview or msg.text),
                 json.dumps(list(msg.labels), ensure_ascii=False),
                 int(msg.has_attachments),
                 msg.size,
@@ -214,10 +214,11 @@ class Store:
         self._conn.execute(
             "UPDATE conversation SET "
             "message_count = (SELECT COUNT(*) FROM message WHERE conversation_id = ?), "
+            "bulk = COALESCE((SELECT MIN(bulk) FROM message WHERE conversation_id = ?), 0), "
             "last_message_at = MAX(COALESCE(last_message_at, 0), ?), "
             "last_owner_at = CASE WHEN ? THEN MAX(COALESCE(last_owner_at, 0), ?) ELSE last_owner_at END "
             "WHERE id = ?",
-            (conversation_id, msg.sent_at, int(msg.is_owner), msg.sent_at, conversation_id),
+            (conversation_id, conversation_id, msg.sent_at, int(msg.is_owner), msg.sent_at, conversation_id),
         )
         return message_id
 
