@@ -71,9 +71,13 @@ unknown is whether today's key tools handle the exact client build:
 
 ### 1a. Owner does — on the phone (vivo X Fold 6)
 1. **Pre-stage media so nothing is skipped.** [V, important] Images/videos **not opened or downloaded in
-   the last 7 days are dropped by migration** (not even a thumbnail survives). Before migrating, open the
-   important chats and let media load, or "收藏"/save the must-keep items. (Huawei zh-cn16032762; Honor
-   support.) Note migration also **excludes** 通话记录 (call logs) and 公众号 chats. [V]
+   the last 7 days are dropped by migration** (not even a thumbnail survives). Verbatim from Huawei support
+   zh-cn01118496 (re-read 2026-10-21): "微信聊天记录中，超过7天以上未打开查看或未下载的图片/视频迁移后是无法查看
+   的(缩略图也不显示)，请在平时注意保存、收藏。" The sentence sits in the phone→phone 迁移 section; the
+   导出到电脑 steps on the same page carry no such note, so for phone→PC treat it as **[I] very likely the
+   same rule** (the phone can only transfer media it holds locally). Before migrating, open the important
+   chats and let media load, or "收藏"/save the must-keep items. Note migration also **excludes** 通话记录
+   (call logs) and 公众号 chats: "不包括微信通话记录、公众号的聊天记录等信息". [V]
 2. Put phone and the chosen desktop on the **same Wi-Fi/LAN**. [V]
 3. Make sure the **same account is logged in on the target desktop** first. [V] (Mac already is; for Linux
    you must install + log in first — see 1b.)
