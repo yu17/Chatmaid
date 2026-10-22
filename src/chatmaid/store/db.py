@@ -1,0 +1,373 @@
+"""SQLite store (schema v1) with a sqlite-vec embedding index."""
+
+import json
+import sqlite3
+import time
+from importlib import resources
+from pathlib import Path
+
+import sqlite_vec
+
+from chatmaid.model import NormalizedMessage, SourceRef, make_preview
+
+_COUNT_TABLES = {
+    "identities": "identity",
+    "contacts": "contact",
+    "conversations": "conversation",
+    "messages": "message",
+    "memories": "memory",
+    "embeddings": "embedding_item",
+    "events": "event_log",
+}
+
+
+def _now() -> int:
+    return int(time.time())
+
+
+class Store:
+    def __init__(self, path: Path, *, embedding_dim: int):
+        self._conn = sqlite3.connect(path, isolation_level=None)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.enable_load_extension(True)
+        sqlite_vec.load(self._conn)
+        self._conn.enable_load_extension(False)
+        if self._conn.execute("PRAGMA user_version").fetchone()[0] == 0:
+            schema = resources.files("chatmaid.store").joinpath("schema_v1.sql").read_text()
+            self._conn.executescript(schema)
+        self._conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_embedding USING vec0("
+            f"item_id INTEGER PRIMARY KEY, embedding float[{int(embedding_dim)}])"
+        )
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def __enter__(self) -> "Store":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    # --- identities and contacts ---
+
+    def owner_contact_id(self) -> int:
+        row = self._conn.execute("SELECT id FROM contact WHERE is_owner = 1").fetchone()
+        if row:
+            return row["id"]
+        cur = self._conn.execute(
+            "INSERT INTO contact (name, is_owner, created_at) VALUES (NULL, 1, ?)", (_now(),)
+        )
+        return cur.lastrowid
+
+    def upsert_identity(
+        self, platform: str, address: str, display_name: str | None, *, is_owner: bool = False
+    ) -> int:
+        row = self._conn.execute(
+            "SELECT id, display_name FROM identity WHERE platform = ? AND address = ?",
+            (platform, address),
+        ).fetchone()
+        if row:
+            if display_name and not row["display_name"]:
+                self._conn.execute(
+                    "UPDATE identity SET display_name = ? WHERE id = ?", (display_name, row["id"])
+                )
+            return row["id"]
+        if is_owner:
+            contact_id = self.owner_contact_id()
+        else:
+            contact_id = self._conn.execute(
+                "INSERT INTO contact (name, is_owner, created_at) VALUES (?, 0, ?)",
+                (display_name, _now()),
+            ).lastrowid
+        return self._conn.execute(
+            "INSERT INTO identity (platform, address, display_name, contact_id) VALUES (?, ?, ?, ?)",
+            (platform, address, display_name, contact_id),
+        ).lastrowid
+
+    def contact_id_of(self, identity_id: int) -> int:
+        row = self._conn.execute(
+            "SELECT contact_id FROM identity WHERE id = ?", (identity_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"no identity {identity_id}")
+        return row["contact_id"]
+
+    # --- conversations ---
+
+    def upsert_conversation(self, platform: str, key: str, title: str, kind: str) -> int:
+        self._conn.execute(
+            "INSERT INTO conversation (platform, key, title, kind) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET title = excluded.title, kind = excluded.kind",
+            (platform, key, title, kind),
+        )
+        return self._conn.execute("SELECT id FROM conversation WHERE key = ?", (key,)).fetchone()["id"]
+
+    def set_conversation_summary(
+        self,
+        conversation_id: int,
+        summary: str,
+        *,
+        tier: str | None = None,
+        events: list[dict] | None = None,
+    ) -> None:
+        self._conn.execute(
+            "UPDATE conversation SET summary = ?, summary_updated_at = ?, "
+            "tier = COALESCE(?, tier), events_json = COALESCE(?, events_json) WHERE id = ?",
+            (
+                summary,
+                _now(),
+                tier,
+                None if events is None else json.dumps(events, ensure_ascii=False),
+                conversation_id,
+            ),
+        )
+
+    def add_participant(self, conversation_id: int, contact_id: int) -> None:
+        self._conn.execute(
+            "INSERT OR IGNORE INTO conversation_participant (conversation_id, contact_id) VALUES (?, ?)",
+            (conversation_id, contact_id),
+        )
+
+    def conversations(
+        self,
+        *,
+        limit: int | None = None,
+        needing_summary: bool | None = None,
+        exclude_bulk: bool = True,
+    ) -> list[sqlite3.Row]:
+        where = []
+        if exclude_bulk:
+            where.append("bulk = 0")
+        if needing_summary is True:
+            where.append("summary IS NULL")
+        elif needing_summary is False:
+            where.append("summary IS NOT NULL")
+        sql = "SELECT * FROM conversation"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY last_message_at DESC"
+        params: tuple = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+        return self._conn.execute(sql, params).fetchall()
+
+    # --- messages ---
+
+    def upsert_message(
+        self, conversation_id: int, msg: NormalizedMessage, sender_identity_id: int
+    ) -> int:
+        platform = self._conn.execute(
+            "SELECT platform FROM conversation WHERE id = ?", (conversation_id,)
+        ).fetchone()["platform"]
+        account = msg.ref.account
+        if msg.message_id is not None:
+            # Same RFC message in another folder: keep the first-seen row.
+            dup = self._conn.execute(
+                "SELECT id FROM message WHERE platform = ? AND account = ? AND message_id = ? "
+                "AND ref_key != ?",
+                (platform, account, msg.message_id, msg.ref.key()),
+            ).fetchone()
+            if dup:
+                return dup["id"]
+        refs = list(msg.references)
+        if msg.in_reply_to is not None and msg.in_reply_to not in refs:
+            refs.append(msg.in_reply_to)
+        self._conn.execute(
+            "INSERT INTO message (conversation_id, ref_key, platform, account, message_id, "
+            "references_json, sender_identity_id, sent_at, kind, subject, preview, labels_json, "
+            "has_attachments, size, is_owner, bulk, body_missing) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(ref_key) DO UPDATE SET conversation_id = excluded.conversation_id, "
+            "message_id = excluded.message_id, references_json = excluded.references_json, "
+            "sender_identity_id = excluded.sender_identity_id, sent_at = excluded.sent_at, "
+            "kind = excluded.kind, subject = excluded.subject, preview = excluded.preview, "
+            "labels_json = excluded.labels_json, has_attachments = excluded.has_attachments, "
+            "size = excluded.size, is_owner = excluded.is_owner, bulk = excluded.bulk, "
+            "body_missing = excluded.body_missing",
+            (
+                conversation_id,
+                msg.ref.key(),
+                platform,
+                account,
+                msg.message_id,
+                json.dumps(refs, ensure_ascii=False),
+                sender_identity_id,
+                msg.sent_at,
+                msg.kind,
+                msg.subject,
+                msg.preview or make_preview(msg.text),
+                json.dumps(list(msg.labels), ensure_ascii=False),
+                int(msg.has_attachments),
+                msg.size,
+                int(msg.is_owner),
+                int(msg.bulk),
+                int(msg.body_missing),
+            ),
+        )
+        message_id = self._conn.execute(
+            "SELECT id FROM message WHERE ref_key = ?", (msg.ref.key(),)
+        ).fetchone()["id"]
+        self._conn.execute(
+            "UPDATE conversation SET "
+            "message_count = (SELECT COUNT(*) FROM message WHERE conversation_id = ?), "
+            "last_message_at = MAX(COALESCE(last_message_at, 0), ?), "
+            "last_owner_at = CASE WHEN ? THEN MAX(COALESCE(last_owner_at, 0), ?) ELSE last_owner_at END "
+            "WHERE id = ?",
+            (conversation_id, msg.sent_at, int(msg.is_owner), msg.sent_at, conversation_id),
+        )
+        return message_id
+
+    def has_message_id(self, platform: str, account: str, message_id: str) -> bool:
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM message WHERE platform = ? AND account = ? AND message_id = ?",
+                (platform, account, message_id),
+            ).fetchone()
+            is not None
+        )
+
+    def message_refs_for(self, conversation_id: int) -> list[tuple[SourceRef, int]]:
+        rows = self._conn.execute(
+            "SELECT id, ref_key FROM message WHERE conversation_id = ? ORDER BY sent_at, id",
+            (conversation_id,),
+        ).fetchall()
+        return [(SourceRef.from_key(r["ref_key"]), r["id"]) for r in rows]
+
+    def messages_for(
+        self, conversation_id: int, *, since: int | None = None, limit: int = 50
+    ) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM message WHERE conversation_id = ?"
+        params: list = [conversation_id]
+        if since is not None:
+            sql += " AND sent_at >= ?"
+            params.append(since)
+        sql += " ORDER BY sent_at, id LIMIT ?"
+        params.append(limit)
+        return self._conn.execute(sql, params).fetchall()
+
+    def message_ids_for_account(
+        self, platform: str, account: str
+    ) -> list[tuple[str, tuple[str, ...]]]:
+        rows = self._conn.execute(
+            "SELECT message_id, references_json FROM message "
+            "WHERE platform = ? AND account = ? AND message_id IS NOT NULL ORDER BY id",
+            (platform, account),
+        ).fetchall()
+        return [(r["message_id"], tuple(json.loads(r["references_json"] or "[]"))) for r in rows]
+
+    # --- memories, style, checkpoints ---
+
+    def add_memory(
+        self,
+        *,
+        kind: str,
+        text: str,
+        source_ref: str,
+        observed_at: int | None,
+        contact_id: int | None = None,
+        conversation_id: int | None = None,
+    ) -> int:
+        return self._conn.execute(
+            "INSERT INTO memory (kind, text, source_ref, observed_at, created_at, contact_id, "
+            "conversation_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (kind, text, source_ref, observed_at, _now(), contact_id, conversation_id),
+        ).lastrowid
+
+    def set_style_profile(
+        self, language: str, tier: str, text: str, sample_refs: list[str]
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO style_profile (language, tier, text, sample_refs_json, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(language, tier) DO UPDATE SET "
+            "text = excluded.text, sample_refs_json = excluded.sample_refs_json, "
+            "updated_at = excluded.updated_at",
+            (language, tier, text, json.dumps(sample_refs, ensure_ascii=False), _now()),
+        )
+
+    def style_profile(self, language: str, tier: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT text FROM style_profile WHERE language = ? AND tier = ?", (language, tier)
+        ).fetchone()
+        return row["text"] if row else None
+
+    def get_checkpoint(self, task: str, key: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT state_json FROM checkpoint WHERE task = ? AND key = ?", (task, key)
+        ).fetchone()
+        return json.loads(row["state_json"]) if row else None
+
+    def set_checkpoint(self, task: str, key: str, state: dict) -> None:
+        self._conn.execute(
+            "INSERT INTO checkpoint (task, key, state_json, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(task, key) DO UPDATE SET state_json = excluded.state_json, "
+            "updated_at = excluded.updated_at",
+            (task, key, json.dumps(state, ensure_ascii=False), _now()),
+        )
+
+    # --- embeddings ---
+
+    def upsert_embedding(self, kind: str, ref_id: int, text_hash: str, vector: list[float]) -> None:
+        self._conn.execute("BEGIN")
+        try:
+            row = self._conn.execute(
+                "SELECT id FROM embedding_item WHERE kind = ? AND ref_id = ?", (kind, ref_id)
+            ).fetchone()
+            if row:
+                item_id = row["id"]
+                self._conn.execute("UPDATE embedding_item SET text_hash = ? WHERE id = ?", (text_hash, item_id))
+                self._conn.execute("DELETE FROM vec_embedding WHERE item_id = ?", (item_id,))
+            else:
+                item_id = self._conn.execute(
+                    "INSERT INTO embedding_item (kind, ref_id, text_hash) VALUES (?, ?, ?)",
+                    (kind, ref_id, text_hash),
+                ).lastrowid
+            self._conn.execute(
+                "INSERT INTO vec_embedding (item_id, embedding) VALUES (?, ?)",
+                (item_id, sqlite_vec.serialize_float32(vector)),
+            )
+            self._conn.execute("COMMIT")
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+
+    def search_embeddings(
+        self, vector: list[float], *, k: int = 10, kind: str | None = None
+    ) -> list[tuple[str, int, float]]:
+        # sqlite-vec 0.1.x needs `k = ?` inside the KNN query; a kind filter is applied
+        # after the join, so over-fetch to keep k results when filtering.
+        fetch = k if kind is None else max(k * 10, 100)
+        rows = self._conn.execute(
+            "SELECT e.kind, e.ref_id, v.distance FROM "
+            "(SELECT item_id, distance FROM vec_embedding WHERE embedding MATCH ? AND k = ? "
+            "ORDER BY distance) v JOIN embedding_item e ON e.id = v.item_id "
+            + ("WHERE e.kind = ? " if kind is not None else "")
+            + "ORDER BY v.distance LIMIT ?",
+            (sqlite_vec.serialize_float32(vector), fetch)
+            + ((kind,) if kind is not None else ())
+            + (k,),
+        ).fetchall()
+        return [(r["kind"], r["ref_id"], r["distance"]) for r in rows]
+
+    # --- event log and counts ---
+
+    def log_event(self, source: str, kind: str, ref: str, payload: dict) -> int:
+        return self._conn.execute(
+            "INSERT INTO event_log (ts, source, kind, ref, payload_json) VALUES (?, ?, ?, ?, ?)",
+            (_now(), source, kind, ref, json.dumps(payload, ensure_ascii=False)),
+        ).lastrowid
+
+    def events(self, *, limit: int = 100) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT * FROM event_log ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+
+    def counts(self) -> dict[str, int]:
+        return {
+            name: self._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for name, table in _COUNT_TABLES.items()
+        }
+
