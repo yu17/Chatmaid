@@ -217,8 +217,14 @@ def test_resolve_unknown_action_raises(flow_env):
 def test_llm_failure_logs_draft_failed_and_keeps_message(flow_env):
     env = flow_env
     env.llm.fail_next(2)
-    row = env.arrive("100")
-    assert row is not None
+    env.add_row(
+        "INBOX", uid="100", message_id="<m100@x>", sender="Ann <ann@x.org>", to="me@x.org",
+        date=1_700_000_500, body="Can we meet Friday?",
+    )
+    assert env.watcher._handle("timer") == 1
+    from chatmaid.model import SourceRef
+
+    assert env.store.message_by_ref(SourceRef("evolution", "a1", "INBOX", "100").key()) is not None
     assert env.store.drafts(status=None) == []
     assert "draft_failed" in kinds(env)
 
@@ -236,3 +242,35 @@ def test_draft_context_roundtrips_for_regenerate(flow_env):
     env.arrive("100")
     d = env.store.drafts()[0]
     assert json.loads(d["context_json"])
+
+
+LONG = "".join(f"w{i:03d} " for i in range(60)).strip()  # 299 chars, tail past 200
+
+
+def test_context_json_holds_previews_only(flow_env):
+    env = flow_env
+    env.arrive("099", body=LONG, date=1_700_000_400)
+    env.arrive("100", body=LONG, in_reply_to="<m099@x>")
+    ctx = json.loads(env.store.drafts()[0]["context_json"])
+    assert len(ctx["message"]) <= 200
+    assert ctx["recent"] and all(len(text) <= 200 for _, _, text in ctx["recent"])
+
+
+def test_regenerate_rebuilds_context_from_source(flow_env):
+    env = flow_env
+    env.arrive("100", body=LONG)
+    env.flow.regenerate(env.store.drafts()[0]["id"], "shorter")
+    assert LONG[200:] in calls(env, "reply_revise")[-1]["user"]
+
+
+def test_regenerate_falls_back_to_stored_context_when_message_is_gone(flow_env, monkeypatch):
+    env = flow_env
+    env.arrive("100", body=LONG)
+
+    def gone(ref):
+        raise KeyError(ref)
+
+    monkeypatch.setattr(env.connector, "fetch", gone)
+    env.flow.regenerate(env.store.drafts()[0]["id"], "shorter")
+    user = calls(env, "reply_revise")[-1]["user"]
+    assert LONG[:200] in user and LONG[200:] not in user

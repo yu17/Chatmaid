@@ -14,7 +14,7 @@ from chatmaid.init.pipeline import add_memories, render_messages
 from chatmaid.llm import prompts
 from chatmaid.llm.base import LLM, LLMError
 from chatmaid.llm.jsoncall import complete_json
-from chatmaid.model import NormalizedMessage, make_preview
+from chatmaid.model import NormalizedMessage, SourceRef, make_preview
 from chatmaid.reply.context import ReplyContext, build_context
 from chatmaid.reply.drafting import draft_reply, revise_reply
 from chatmaid.store import Store
@@ -180,6 +180,19 @@ class ReplyFlow:
                 return v
         raise ValueError(f"draft {draft_id} has no version {version_id}")
 
+    def _context_for(self, draft: sqlite3.Row) -> ReplyContext:
+        """Rebuild the live context from the source mail; the stored record has previews only."""
+        try:
+            row = self.store.message(draft["message_id"])
+            msg = self.connector.fetch(SourceRef.from_key(row["ref_key"]))
+        except (KeyError, OSError, sqlite3.Error, TypeError) as e:
+            log.warning("draft %s: source message unavailable (%s); using stored context", draft["id"], e)
+            return ReplyContext.from_json(json.loads(draft["context_json"]))
+        return build_context(
+            self.store, self.connector, self.llm, self.cfg, draft["conversation_id"], msg,
+            now=self.now(),
+        )
+
     def latest_text(self, draft_id: int) -> str:
         return self._latest_first(draft_id)["text"]
 
@@ -190,7 +203,7 @@ class ReplyFlow:
             if from_version is not None
             else self.latest_text(draft_id)
         )
-        ctx = ReplyContext.from_json(json.loads(draft["context_json"]))
+        ctx = self._context_for(draft)
         cand = revise_reply(self.llm, self.cfg, ctx, previous, comment)
         store = self.store
         with store.transaction():

@@ -12,7 +12,7 @@ from chatmaid.config import Config
 from chatmaid.connectors.base import Connector
 from chatmaid.init.chunking import detect_language
 from chatmaid.llm.base import LLM, LLMError
-from chatmaid.model import NormalizedMessage, SourceRef
+from chatmaid.model import NormalizedMessage, SourceRef, make_preview
 from chatmaid.store import Store
 
 log = logging.getLogger(__name__)
@@ -32,15 +32,16 @@ class ReplyContext:
     message: str
 
     def to_json(self) -> dict:
+        """Stored record: previews only (200 chars), never full message bodies."""
         return {
             "contact_card": self.contact_card,
             "summary": self.summary,
-            "recent": [[t, who, text[:RECENT_CHARS]] for t, who, text in self.recent],
+            "recent": [[t, who, make_preview(text)] for t, who, text in self.recent],
             "memories": list(self.memories),
             "style": self.style,
             "language": self.language,
             "tier": self.tier,
-            "message": self.message,
+            "message": make_preview(self.message),
         }
 
     @classmethod
