@@ -93,8 +93,8 @@ Anti-goals (would make this a failure even if it "works")
  WeChat desktop client (Mac now; VM or Linux later)   Evolution (workstation)
    db_storage/*.db (SQLCipher)  msg/ media              ~/.cache/evolution/mail/<acct>/
           │ one-shot: key → decrypt to a working copy          folders.db + body cache
-          ▼                                                     │ read-only, polled or
-   wechat importer ──────────────┐            ┌──────────────── inotify
+          ▼                                                     │ read-only; D-Bus Newmail
+   wechat importer ──────────────┐            ┌──────────────── signal or inotify
                                  ▼            ▼
                         normalized message store (SQLite)
                         messages · conversations · contacts · media index
@@ -151,11 +151,53 @@ WeChat database (the owner's own action); the key tool runs a re-signed copy
 of WeChat.app and reads its memory (no data modified, but third-party code runs
 on the Mac). Both need the owner's go.
 
-## 7. Email connector
+## 7. Email connector (read-only, through Evolution)
 
-(To be completed from `docs/research/evolution-email-access.md` once that
-research lands. Placeholder for: read path, notification path, later
-draft/send path, accounts in scope.)
+Details and sources are in `docs/research/evolution-email-access.md`. Verified
+on the workstation on 2026-10-21: Evolution 3.62.1 is running; nine accounts
+are cached under `~/.cache/evolution/mail/<uid>/`, each with a `folders.db`
+(SQLite tables `keys`, `folders`, and one `messages_<folder_id>` per folder)
+and raw RFC822 body files under `folders/<Name>/cur/<hh>/<imap-uid>`; the
+Exchange and Microsoft 365 accounts use the same cache format as IMAP, so no
+OAuth work is needed to read them; Evolution's mail-notification plugin has
+D-Bus signalling enabled; `org.gnome.Evolution` is on the session bus.
+
+Read path. For each account in scope, open `folders.db` with
+`file:...?mode=ro`, short autocommit SELECTs and a busy timeout. Never
+read-write, never `immutable=1` on the live file, never a long transaction
+(Evolution's writer gives up after about 15 seconds of lock). Enumerate
+`folders`, read each `messages_<id>` table (uid, flags, dates, subject, from,
+to, cc, thread reference, labels, preview), parse the body file with Python's
+`email` package when it exists, and map into the normalized model: a mail
+thread is a conversation (grouped by References/In-Reply-To, falling back to
+normalized subject), each address is a contact, attachments become media.
+Import is idempotent on (account uid, folder, imap uid). Messages without a
+cached body are stored header-only and marked so.
+
+Completeness depends on Evolution's "Download messages for offline usage"
+setting: with it on, bodies for everything within the age limit are on disk;
+with it off, only opened mail is cached and files expire after 7 days. The
+probe shows 9 of 14 mail-related sources have it on. Enabling it for the
+accounts in scope is a change the owner makes in Evolution's account settings.
+
+Notification path. Subscribe on the session bus to the `Newmail` signal
+(interface `org.gnome.evolution.mail.dbus.Signal`, path
+`/org/gnome/evolution/mail/newmail`), which carries folder name, count, the
+message uid, sender and subject. By default it fires for Inbox folders only.
+Fallback: inotify on `folders.db` with debouncing and a diff by max uid. Both
+only work while Evolution runs, which matches how the owner uses it.
+
+Later draft and send (phase 2, only after approval). Run
+`evolution 'mailto:...?subject=...&In-Reply-To=...&References=...&body=...'`
+to open a prefilled, correctly threaded compose window in the running
+Evolution; the owner edits and clicks Send, and Evolution keeps its own Sent
+and Drafts bookkeeping. No automated send and no draft creation in phase 1.
+
+Not chosen. A libcamel client from Python is possible but needs a
+`CamelSession` subclass with six vfunc overrides, its own cache directories,
+and its own authentication; plain read-only IMAP would duplicate Evolution's
+connections and need OAuth tokens through EDS or GNOME Online Accounts. Both
+stay as plan B if a body is ever needed that the cache does not hold.
 
 ## 8. Storage, privacy and operations
 
@@ -180,9 +222,12 @@ Ordered by how much they change what gets built.
    ≤4.1.12 build, and accepts displacing the Mac login) versus the MacBook
    (AppleScript sending, no VM) versus the Linux client (xdotool sending,
    immature). Can be deferred.
-3. **Email accounts in scope.** All nine cached accounts, or a subset. Exchange
-   and Microsoft 365 accounts are cached by Evolution in the same format, so
-   reading the cache covers them without any OAuth work.
+3. **Email accounts in scope, and offline download.** All nine cached accounts
+   or a subset (the largest single cache is 12 GB). Exchange and Microsoft 365
+   accounts are cached in the same format, so the cache route covers them
+   without OAuth work. For full bodies, the owner enables "Download messages
+   for offline usage" on the in-scope accounts in Evolution; otherwise the
+   connector sees bodies only for mail opened in the last 7 days.
 4. **Language and stack.** My call is Python 3.14 with uv (see 10); confirm or
    override.
 5. **Data directory and size budget.** Where the store and media go (the
