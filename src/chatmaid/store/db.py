@@ -131,6 +131,14 @@ class Store:
             (conversation_id, contact_id),
         )
 
+    def participant_contact_ids(self, conversation_id: int) -> list[int]:
+        rows = self._conn.execute(
+            "SELECT contact_id FROM conversation_participant WHERE conversation_id = ? "
+            "ORDER BY contact_id",
+            (conversation_id,),
+        ).fetchall()
+        return [r["contact_id"] for r in rows]
+
     def conversations(
         self,
         *,

@@ -40,7 +40,7 @@ def test_ingest_since_filters_old_messages(fake_env, store):
 
 def test_run_rejects_unimplemented_pass(fake_env, store):
     with pytest.raises(NotImplementedError):
-        _pipeline(fake_env, store).run(InitOptions(passes=("digest",)))
+        _pipeline(fake_env, store).run(InitOptions(passes=("style",)))
 
 
 def test_since_run_does_not_hide_older_rows_from_later_run(fake_env, store):

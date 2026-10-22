@@ -1,11 +1,15 @@
 """Init pipeline. Pass 1 (ingest) reads the connector into the store; no model calls."""
 
+import json
 import logging
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from chatmaid.config import Config
 from chatmaid.connectors.base import Connector
+from chatmaid.init.chunking import chunk_messages
+from chatmaid.llm import prompts
 from chatmaid.llm.base import LLM, LLMError
 from chatmaid.model import NormalizedMessage
 from chatmaid.store import Store
@@ -14,6 +18,7 @@ from chatmaid.threads import ThreadIndex, normalize_subject, thread_fallback_key
 log = logging.getLogger(__name__)
 
 LOCAL_ACCOUNT = "local"  # Maildir uids are not integers: never checkpointed
+DIGEST_MAX_TOKENS = 8192  # qwen3 reasoning tokens count against max_tokens; 1024 returned empty content
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,30 @@ def conversation_key(index: ThreadIndex, msg: NormalizedMessage) -> str:
     return f"email:{msg.ref.account}:{index.key_for(msg.message_id, _refs(msg), fallback)}"
 
 
+@dataclass(frozen=True)
+class DigestStats:
+    conversations: int
+    chunks: int
+    memories: int
+    failed: int
+
+
+def _render(msgs: list[NormalizedMessage]) -> str:
+    lines = []
+    for m in msgs:
+        when = datetime.fromtimestamp(m.sent_at, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        lines.append(f"[{when} {m.sender.name or m.sender.email}] {m.text}")
+    return "\n".join(lines)
+
+
+def _event_time(date: str) -> int | None:
+    try:
+        day = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return int(day.replace(tzinfo=timezone.utc).timestamp())
+
+
 def _usable(state: dict, since: int | None) -> bool:
     """A checkpoint written under a later `since` would hide older rows from this run."""
     stored = state.get("since")
@@ -71,9 +100,12 @@ class InitPipeline:
     def run(self, opts: InitOptions) -> dict[str, object]:
         results: dict[str, object] = {}
         for name in opts.passes:
-            if name != "ingest":
+            if name == "ingest":
+                results[name] = self.ingest(opts)
+            elif name == "digest":
+                results[name] = self.digest(opts)
+            else:
                 raise NotImplementedError(f"pass {name!r} is not implemented yet")
-            results[name] = self.ingest(opts)
         return results
 
     # -- pass 1: ingest -------------------------------------------------
@@ -157,3 +189,89 @@ class InitPipeline:
             store.add_participant(cid, contact_id)
         store.upsert_message(cid, msg, sender_id)
         return cid
+
+    # -- pass 2: digest -------------------------------------------------
+    def digest(self, opts: InitOptions) -> DigestStats:
+        rows = self.store.conversations(
+            needing_summary=True, exclude_bulk=opts.skip_bulk, limit=opts.limit_conversations
+        )
+        done = chunks = memories = failed = 0
+        for row in rows:
+            try:
+                n_chunks, n_memories = self._digest_conversation(row["id"], opts)
+            except (LLMError, ValueError, KeyError, TypeError) as e:
+                log.warning("digest failed for conversation %s: %s", row["id"], e)
+                failed += 1
+                continue
+            done += 1
+            chunks += n_chunks
+            memories += n_memories
+        return DigestStats(done, chunks, memories, failed)
+
+    def _complete_json(self, prompt: prompts.Prompt, user: str) -> dict:
+        raw = self.llm.complete(
+            system=prompt.system,
+            user=user,
+            model=self.cfg.lmstudio.model_main,
+            json_schema=prompt.schema,
+            max_tokens=DIGEST_MAX_TOKENS,
+        )
+        return json.loads(raw)  # JSONDecodeError is a ValueError
+
+    def _digest_conversation(self, cid: int, opts: InitOptions) -> tuple[int, int]:
+        store = self.store
+        msgs = []
+        for ref, _ in store.message_refs_for(cid):
+            try:
+                msgs.append(self.connector.fetch(ref))
+            except KeyError:  # moved or deleted in the mail client since ingest
+                log.warning("digest: message %s is no longer available", ref.key())
+        chunks = chunk_messages(msgs, chunk_chars=opts.chunk_chars)
+        if not chunks:
+            raise ValueError(f"conversation {cid} has no fetchable messages")
+        chunk_prompt = prompts.load("chunk_summary")
+        rolling_prompt = prompts.load("rolling_summary")
+        owner = store.owner_contact_id()
+        others = [c for c in store.participant_contact_ids(cid) if c != owner]
+        contact_id = others[0] if len(others) == 1 else None
+
+        state = store.get_checkpoint("digest", str(cid)) or {}
+        start = state["chunk"] + 1 if "chunk" in state else 0
+        summary: str = state.get("summary", "")
+        events: list[dict] = list(state.get("events", []))
+        memories = 0
+        for i in range(start, len(chunks)):
+            chunk = chunks[i]
+            out = self._complete_json(chunk_prompt, _render(chunk))
+            new_summary = out["summary"]
+            if i > 0:
+                merged = self._complete_json(
+                    rolling_prompt,
+                    f"Previous summary:\n{summary}\n\nNew chunk summary:\n{new_summary}",
+                )
+                new_summary = merged["summary"]
+            summary = new_summary
+            events.extend(out["events"])
+            memories += self._add_memories(out, chunk[0].ref.key(), cid, contact_id)
+            store.set_checkpoint(
+                "digest", str(cid), {"chunk": i, "summary": summary, "events": events}
+            )
+        store.set_conversation_summary(cid, summary, events=events)
+        store.set_checkpoint("digest", str(cid), {"done": True})
+        return len(chunks) - start, memories
+
+    def _add_memories(self, out: dict, source_ref: str, cid: int, contact_id: int | None) -> int:
+        n = 0
+        for fact in out["facts"]:
+            self.store.add_memory(
+                kind="fact", text=f"{fact['about']}: {fact['text']}", source_ref=source_ref,
+                observed_at=None, contact_id=contact_id, conversation_id=cid,
+            )
+            n += 1
+        for event in out["events"]:
+            self.store.add_memory(
+                kind="event", text=event["text"], source_ref=source_ref,
+                observed_at=_event_time(event["date"]), contact_id=contact_id, conversation_id=cid,
+            )
+            n += 1
+        return n

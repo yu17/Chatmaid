@@ -113,3 +113,12 @@ def test_clear_checkpoints(store):
     assert store.clear_checkpoints("ingest") == 2
     assert store.checkpoints("ingest") == {}
     assert store.get_checkpoint("other", "a") == {"x": 1}
+
+
+def test_participant_contact_ids(store):
+    cid = store.upsert_conversation("email", "k-part", "t", "thread")
+    a = store.contact_id_of(store.upsert_identity("email", "a@x.org", "A", is_owner=False))
+    b = store.contact_id_of(store.upsert_identity("email", "b@x.org", "B", is_owner=False))
+    store.add_participant(cid, b)
+    store.add_participant(cid, a)
+    assert store.participant_contact_ids(cid) == sorted([a, b])
