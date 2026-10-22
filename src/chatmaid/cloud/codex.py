@@ -8,6 +8,16 @@ from pathlib import Path
 from chatmaid.cloud.base import CloudError, run_cli
 
 
+# Every feature that lets the model run or reach anything (ruling R14, checked on codex-cli
+# 0.163.0: the tool router then reports "code-mode host is disabled" and the model answers in
+# text). `-s read-only` stays as defence in depth.
+DISABLED_FEATURES = (
+    "shell_tool", "unified_exec", "code_mode_host", "apps", "multi_agent", "plugins",
+    "browser_use", "computer_use",
+)
+_DISABLED_ARGS = [arg for feature in DISABLED_FEATURES for arg in ("--disable", feature)]
+
+
 class CodexBackend:
     name = "codex"
 
@@ -26,6 +36,7 @@ class CodexBackend:
             out_path = root / "out.json"
             argv = [
                 "codex", "exec", "--ephemeral", "--ignore-user-config", "--ignore-rules",
+                *_DISABLED_ARGS,
                 "-s", "read-only", "-C", str(empty), "--skip-git-repo-check", "--color", "never",
                 "--output-schema", str(schema_path), "-o", str(out_path),
                 *(["-m", self.model] if self.model else []),

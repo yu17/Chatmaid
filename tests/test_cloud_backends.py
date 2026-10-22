@@ -42,12 +42,17 @@ def test_codex_command_shape_and_output_file():
     r = Runner(write_out=GOOD)
     out = CodexBackend("gpt-x", timeout_s=30, runner=r).complete("PROMPT", CLOUD_SCHEMA)
     assert out == GOOD
-    assert r.argv[:9] == ["codex", "exec", "--ephemeral", "--ignore-user-config", "--ignore-rules",
-                          "-s", "read-only", "-C", str(r.cwd)]
-    i = r.argv.index("--skip-git-repo-check")
-    assert r.argv[i : i + 3] == ["--skip-git-repo-check", "--color", "never"]
-    assert r.argv[r.argv.index("-m") + 1] == "gpt-x"
-    assert r.argv[-1] == "PROMPT"
+    root = Path(r.cwd).parent
+    assert r.argv == [
+        "codex", "exec", "--ephemeral", "--ignore-user-config", "--ignore-rules",
+        "--disable", "shell_tool", "--disable", "unified_exec", "--disable", "code_mode_host",
+        "--disable", "apps", "--disable", "multi_agent", "--disable", "plugins",
+        "--disable", "browser_use", "--disable", "computer_use",
+        "-s", "read-only", "-C", str(r.cwd), "--skip-git-repo-check", "--color", "never",
+        "--output-schema", str(root / "schema.json"), "-o", str(root / "out.json"),
+        "-m", "gpt-x",
+        "PROMPT",
+    ]
     assert r.cwd_entries == []
     assert r.kwargs["stdin"] is subprocess.DEVNULL
     assert r.kwargs["timeout"] == 30
@@ -71,11 +76,14 @@ def test_claude_command_shape_and_structured_output():
     r = Runner(stdout=stdout)
     out = ClaudeBackend("sonnet", timeout_s=30, runner=r).complete("PROMPT", CLOUD_SCHEMA)
     assert out == GOOD
-    assert r.argv[:3] == ["claude", "-p", "--tools"]
-    assert r.argv[r.argv.index("--json-schema") + 1] == json.dumps(CLOUD_SCHEMA)
-    assert r.argv[r.argv.index("--model") + 1] == "sonnet"
+    assert r.argv == [
+        "claude", "-p", "--tools", "", "--no-session-persistence", "--setting-sources", "",
+        "--disable-slash-commands", "--strict-mcp-config", "--output-format", "json",
+        "--json-schema", json.dumps(CLOUD_SCHEMA),
+        "--model", "sonnet",
+        "PROMPT",
+    ]
     assert "--bare" not in r.argv
-    assert r.argv[-1] == "PROMPT"
     assert r.cwd_entries == []
     assert r.kwargs["stdin"] is subprocess.DEVNULL
 
