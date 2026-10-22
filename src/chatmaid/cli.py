@@ -3,6 +3,7 @@
 import argparse
 
 from chatmaid import __version__
+from chatmaid.connectors.evolution.sources import register_accounts
 
 
 def build_parser() -> tuple[argparse.ArgumentParser, argparse._SubParsersAction]:
@@ -10,6 +11,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, argparse._SubParsersAction]
     parser.add_argument("--version", action="store_true", help="print version and exit")
     parser.add_argument("--config", default="data/config.toml", help="path to config.toml")
     subparsers = parser.add_subparsers(dest="command")
+    register_accounts(subparsers)
     return parser, subparsers
 
 
