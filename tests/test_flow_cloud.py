@@ -213,3 +213,15 @@ def test_tagged_name_is_redacted(flow_env):
     assert "Zed" not in p.payload
     mapping = json.loads(env.store.cloud_call(p.call_id)["mapping_json"])
     assert any(k.startswith("[PERSON_") and v == "Zed" for k, v in mapping.items())
+
+
+def test_tagger_sees_the_summary(flow_env):
+    env = flow_env
+    did = setup(env)
+    cid = env.store.drafts()[0]["conversation_id"]
+    env.store.set_conversation_summary(cid, "Zed asked about Friday")
+    env.llm.responses["pii_tag"] = '{"persons":["Zed"]}'
+    p = env.flow.propose_cloud(did)
+    assert "Zed" not in p.payload
+    tag_calls = [c for c in env.llm.calls if "Zed asked about Friday" in c["user"]]
+    assert tag_calls

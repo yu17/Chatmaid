@@ -71,3 +71,17 @@ def test_name_with_punctuation_or_whitespace_is_matched():
     p = Pseudonymizer([("John (Acme)", "PERSON"), ("Ann ", "PERSON")])
     assert p.redact("John (Acme) and Ann met") == "[PERSON_1] and [PERSON_2] met"
     assert p.redact("Annie") == "Annie"
+
+
+def test_name_parts_are_redacted_alone():
+    p = Pseudonymizer([("Ann Lee", "PERSON")])
+    assert p.redact("Lee said hi") == "[PERSON_1] said hi"
+    p = Pseudonymizer([("Ann Lee", "PERSON")])
+    assert p.redact("Ann Lee and Lee") == "[PERSON_1] and [PERSON_2]"
+
+
+def test_urls_and_domains_become_placeholders():
+    p = Pseudonymizer([])
+    out = p.redact("see https://annlee.example.com/x and annlee.com or www.foo.org")
+    assert out == "see [URL_1] and [URL_2] or [URL_3]"
+    assert Pseudonymizer([]).redact("Hi Ann, ok.") == "Hi Ann, ok."

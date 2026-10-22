@@ -1,4 +1,7 @@
-"""Reversible pseudonymization: names, addresses, phone numbers and amounts become placeholders."""
+"""Reversible pseudonymization: names, addresses, URLs, phone numbers and amounts become placeholders.
+
+Placeholders are [PERSON_n], [EMAIL_n], [URL_n], [PHONE_n] and [AMOUNT_n].
+"""
 
 import re
 from collections.abc import Callable, Iterable
@@ -10,13 +13,19 @@ from chatmaid.llm.jsoncall import complete_json
 from chatmaid.store.db import Store
 
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+URL_RE = re.compile(
+    r"(?:https?://|www\.)[^\s<>\"']+"
+    r"|(?<![\w@.-])(?:[\w-]+\.)+(?:com|org|net|edu|gov|io|co|cn|me|info|de|uk|jp|app|dev|ai|xyz)"
+    r"(?:/[^\s<>\"']*)?(?![\w.-])",
+    re.I,
+)
 PHONE_RE = re.compile(r"(?<![\w.])\+?\d[\d \-]{7,}\d(?![\w.])")
 AMOUNT_RE = re.compile(
     r"(?:[$¥€£]|RMB|USD|CNY)\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s?(?:元|美元|块钱|块)"
 )
 
 _ISO_DATE_RE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$")
-_PLACEHOLDER_RE = re.compile(r"\[(?:PERSON|EMAIL|PHONE|AMOUNT)_\d+\]")
+_PLACEHOLDER_RE = re.compile(r"\[(?:PERSON|EMAIL|URL|PHONE|AMOUNT)_\d+\]")
 
 
 class Pseudonymizer:
@@ -29,6 +38,11 @@ class Pseudonymizer:
             original = original.strip()
             if len(original) >= 2 and kind != "EMAIL":  # EMAIL_RE covers addresses
                 self._kinds.setdefault(original.lower(), kind)
+                words = original.split()
+                if kind == "PERSON" and len(words) >= 2:
+                    for word in words:
+                        if len(word) >= 3:
+                            self._kinds.setdefault(word.lower(), kind)
         originals = sorted(self._kinds, key=len, reverse=True)
         parts = [
             rf"(?<!\w){re.escape(o)}(?!\w)" if o.isascii() else re.escape(o) for o in originals
@@ -69,6 +83,7 @@ class Pseudonymizer:
 
     def redact(self, text: str) -> str:
         text = self._sub(text, EMAIL_RE, lambda s: "EMAIL")  # first: names inside addresses
+        text = self._sub(text, URL_RE, lambda s: "URL")  # before names: domains can hold them
         if self._deny_re:
             text = self._sub(text, self._deny_re, lambda s: self._kinds[s.lower()])
         text = self._sub(text, PHONE_RE, lambda s: None if _ISO_DATE_RE.match(s) else "PHONE")

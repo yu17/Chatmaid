@@ -278,7 +278,8 @@ class ReplyFlow:
         ctx = self._context_for(draft)
         deny = deny_list_for(self.store, self.cfg, draft["conversation_id"])
         try:
-            names = tag_persons(self.llm, self.cfg.lmstudio.model_small, previous + "\n" + ctx.message)
+            tag_text = "\n".join([previous, comment or "", ctx.summary, ctx.message[:1500]])
+            names = tag_persons(self.llm, self.cfg.lmstudio.model_small, tag_text)
         except LLMError as e:
             log.warning("draft %s: person tagging failed (%s); using the deny list only", draft_id, e)
             names = []
