@@ -35,3 +35,27 @@ async def test_file_trigger_is_debounced(tmp_path):
             await asyncio.wait_for(anext(it), 1)
     finally:
         await it.aclose()
+
+
+async def test_file_watch_is_not_recursive(tmp_path, monkeypatch):
+    from chatmaid.connectors.evolution import events
+
+    captured = {}
+
+    async def fake_awatch(*paths, **kwargs):
+        captured["paths"] = paths
+        captured.update(kwargs)
+        yield {(1, str(tmp_path / "a" / "folders.db"))}
+        await asyncio.Event().wait()  # keep watching until cancelled, like the real one
+
+    monkeypatch.setattr(events.watchfiles, "awatch", fake_awatch)
+    src = EventSource(
+        [tmp_path / "a" / "folders.db", tmp_path / "b" / "folders.db"], interval_s=3600, enable_dbus=False
+    )
+    it = src.triggers()
+    try:
+        assert await asyncio.wait_for(anext(it), 5) == "file"
+    finally:
+        await it.aclose()
+    assert captured["recursive"] is False
+    assert sorted(captured["paths"]) == [str(tmp_path / "a"), str(tmp_path / "b")]

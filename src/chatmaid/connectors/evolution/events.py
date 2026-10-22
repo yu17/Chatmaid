@@ -56,7 +56,9 @@ class EventSource:
 
         try:
             async for _changes in watchfiles.awatch(
-                *parents, watch_filter=lambda _change, path: Path(path).name in names
+                *parents,
+                recursive=False,  # the accounts' own directories only, not every cur/<hh>/ bucket
+                watch_filter=lambda _change, path: Path(path).name in names,
             ):
                 if pending is None or pending.done():
                     pending = asyncio.create_task(emit_later())
