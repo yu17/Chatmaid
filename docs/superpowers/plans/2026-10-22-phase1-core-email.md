@@ -609,7 +609,7 @@ git commit -m "feat: Evolution connector with dedup, Sent detection and scan com
 **Interfaces:**
 - Produces: `LLMError(Exception)`; `LLM` protocol with `complete(*, system: str, user: str, model: str, json_schema: dict | None = None, max_tokens: int = 1024, temperature: float = 0.3) -> str` and `embed(texts: list[str], *, model: str) -> list[list[float]]`.
 - Produces: `LMStudioClient(base_url: str, token: str, *, timeout_s: int = 600)` implementing `LLM` through `openai.OpenAI(base_url=..., api_key=token, timeout=timeout_s, max_retries=1)`; `json_schema` is passed as `response_format={"type": "json_schema", "json_schema": {"name": "out", "schema": json_schema, "strict": True}}`; `list_models() -> list[str]`; any `openai` exception is re-raised as `LLMError(str(e))`.
-- Produces: `FakeLLM(responses: dict[str, str] | None = None, *, dim: int = 4)` whose `complete` returns `responses[<first line of system>]` or `"{}"`, records every call in `calls: list[dict]`, and whose `embed` returns deterministic vectors derived from `hash(text)`; `FakeLLM.fail_next(n: int)` makes the next `n` calls raise `LLMError("timeout")`.
+- Produces: `FakeLLM(responses: dict[str, str] | None = None, *, dim: int = 4)` whose `complete` returns `responses[<first line of system, with a leading "# " stripped>]` or `"{}"` (every prompt file's system text begins with the line `# <prompt name>`, see Task 10), records every call in `calls: list[dict]`, and whose `embed` returns deterministic vectors derived from `hash(text)`; `FakeLLM.fail_next(n: int)` makes the next `n` calls raise `LLMError("timeout")`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -672,7 +672,8 @@ git commit -m "feat: LLM protocol, LM Studio client and FakeLLM"
 
 **Interfaces:**
 - Produces: `InitOptions(since: int | None = None, limit_conversations: int | None = None, skip_bulk: bool = True, chunk_chars: int = 9000, passes: tuple[str, ...] = ("ingest", "digest", "style", "embed"))`; `IngestStats(messages: int, new_messages: int, conversations: int, identities: int, skipped_dup: int)`; `InitPipeline(store: Store, connector: Connector, llm: LLM, cfg: Config)` with `ingest(opts: InitOptions) -> IngestStats` and `run(opts) -> dict[str, object]` executing the requested passes in order.
-- Ingest algorithm (the part the signature does not determine): per account, per folder, read rows after the checkpoint `("ingest", "<account>/<folder>") -> {"last_uid": int}`; for each message: `store.upsert_identity` for sender (owner flag from `msg.is_owner` only when the sender matches `OwnerIdentity`) and recipients; thread key = `ThreadIndex.key_for(message_id, references, thread_fallback_key(subject, participant emails))` with one `ThreadIndex` per account kept in memory and rebuilt from `store` message ids at start (`store.message_ids_for_account(account) -> list[tuple[str, tuple[str, ...]]]` added in this task, returning `(message_id, references)` pairs stored as `references_json` on the message row); conversation key = `"email:" + <account> + ":" + <thread key>`, title = `normalize_subject` of the earliest message or its raw subject; `conversation.bulk` is set when every message so far is bulk; checkpoint after each folder with the last uid.
+- Produces (module-level in `init/pipeline.py`, shared with Task 13): `build_thread_index(store: Store, platform: str, account: str) -> ThreadIndex` (rebuilt from `store.message_ids_for_account`) and `conversation_key(index: ThreadIndex, msg: NormalizedMessage) -> str` returning `"email:" + msg.ref.account + ":" + index.key_for(msg.message_id, msg.references + ((msg.in_reply_to,) if msg.in_reply_to else ()), thread_fallback_key(msg.subject, participant emails))`.
+- Ingest algorithm (the part the signature does not determine): per account, per folder, read rows after the checkpoint `("ingest", "<account>/<folder>") -> {"last_uid": int}`; for each message: `store.upsert_identity` for sender (owner flag from `msg.is_owner` only when the sender matches `OwnerIdentity`) and recipients; conversation key from `conversation_key` with one `ThreadIndex` per account kept in memory for the run (built by `build_thread_index` at start and updated with each new message); title = `normalize_subject` of the earliest message or its raw subject; `conversation.bulk` is set when every message so far is bulk; checkpoint after each folder with the last uid.
 - `chatmaid init [--since YYYY-MM-DD] [--limit N] [--pass ingest|digest|style|embed|all] [--fake-llm]` and `chatmaid status` (prints `store.counts()` and the number of conversations with and without a summary).
 
 - [ ] **Step 1: Write the failing tests**
@@ -734,7 +735,7 @@ git commit -m "feat: resumable ingest pass and status command"
 
 **Interfaces:**
 - Produces: `detect_language(text: str) -> str` returning `"zh"` when at least 30 % of alphabetic characters are CJK, else `"en"`; `chunk_messages(msgs: list[NormalizedMessage], *, chunk_chars: int) -> list[list[NormalizedMessage]]` splitting in order so each chunk's total `len(text)` stays under `chunk_chars` (a single oversized message forms its own chunk, text truncated to `chunk_chars`).
-- Produces: `prompts.load(name: str) -> Prompt(system: str, schema: dict)` reading `prompts/<name>.md` whose first fenced ```json block is the schema and the rest is the system text. Schemas: `chunk_summary` → `{"summary": str, "events": [{"date": str, "text": str}], "facts": [{"about": str, "text": str}]}`; `rolling_summary` → `{"summary": str}`.
+- Produces: `prompts.load(name: str) -> Prompt(name: str, system: str, schema: dict)` reading `prompts/<name>.md` whose first line is `# <name>`, whose first fenced ```json block is the schema, and whose remaining text (including that first line) is the system text. Schemas: `chunk_summary` → `{"summary": str, "events": [{"date": str, "text": str}], "facts": [{"about": str, "text": str}]}`; `rolling_summary` → `{"summary": str}`.
 - Produces: `DigestStats(conversations: int, chunks: int, memories: int, failed: int)`; `InitPipeline.digest(opts) -> DigestStats`: for conversations `needing_summary=True` (newest first, `exclude_bulk=opts.skip_bulk`, `limit=opts.limit_conversations`), fetch texts through `connector.fetch` for `store.message_refs_for(cid)`, chunk, call `chunk_summary` with `model_main` per chunk (user text = messages rendered as `[<date> <sender name or email>] <text>` lines), merge summaries with `rolling_summary`, write `set_conversation_summary` with events, `add_memory(kind="fact"|"event", ...)` with `source_ref` = the chunk's first message ref key and `contact_id` = the conversation's non-owner contact when exactly one exists; checkpoint `("digest", str(cid)) -> {"chunk": i, "summary": partial}` after each chunk; an `LLMError` marks the conversation failed and moves on.
 
 - [ ] **Step 1: Write the failing tests**
@@ -763,7 +764,10 @@ def test_digest_resumes_after_llm_failure(ingested_env):
 def test_digest_skips_bulk_conversations(ingested_env):   # fixture includes a List-Unsubscribe thread
     llm = FakeLLM({"chunk_summary": '{"summary":"S1","events":[],"facts":[]}', "rolling_summary": '{"summary":"S"}'})
     InitPipeline(ingested_env.store, ingested_env.connector, llm, ingested_env.config).digest(InitOptions())
-    assert all(not c["bulk"] for c in ingested_env.store.conversations(needing_summary=False))
+    rows = ingested_env.store.conversations(exclude_bulk=False)
+    bulk = [c for c in rows if c["bulk"]]
+    assert bulk and all(c["summary"] is None for c in bulk)
+    assert all(c["summary"] is not None for c in rows if not c["bulk"])
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -945,7 +949,7 @@ Run: `uv run pytest tests/test_events.py tests/test_daemon.py -v` — Expected: 
 
 - [ ] **Step 3: Implement `events.py`, `daemon.py`, and `watch`**
 
-The `Watcher` reuses the ingest key derivation by moving it into `InitPipeline.conversation_key(msg) -> str` (Task 9 refactor within this task) so both paths produce identical keys.
+The `Watcher` reuses Task 9's module-level `build_thread_index` and `conversation_key` so both paths produce identical keys; it keeps one `ThreadIndex` per account for its lifetime and adds each routed message to it.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
