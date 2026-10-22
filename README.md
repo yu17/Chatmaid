@@ -26,10 +26,18 @@ UI come later; research notes are in [`docs/research/`](docs/research/README.md)
 ## Layout
 
 ```
-src/chatmaid/        package: cli, store, email connector, watcher, LLM client, digest
-tests/               pytest suite (fixture Evolution caches and a fake LLM)
-docs/research/       research notes that inform the design
-config.example.toml  template for data/config.toml
+src/chatmaid/
+  cli.py config.py model.py identity.py threads.py lookup.py
+  daemon.py             watch loop
+  connectors/           base.py; evolution/ (sources, cache, rfc822, connector, events)
+  store/                db.py, schema_v1.sql
+  llm/                  base.py, lmstudio.py, fake.py, prompts/
+  init/                 pipeline.py (ingest, digest), passes.py (style, embed), chunking.py
+  triage/rules.py
+tests/                  pytest suite (fixture Evolution caches and a fake LLM)
+docs/                   research notes that inform the design
+data/                   index and config (gitignored)
+config.example.toml     template for data/config.toml
 ```
 
 ## Setup
@@ -73,9 +81,6 @@ Notes:
   three triggers; locked databases are retried on the next trigger. It listens
   for Evolution's `Newmail` D-Bus signal, watches `folders.db` for changes, and
   polls every `--interval` seconds; `--no-dbus` disables the signal.
-- The digest controls thinking per model: thinking models get an assistant
-  prefill that disables reasoning and the JSON is validated in code; the small
-  model uses grammar-constrained JSON.
 
 ## What stays read-only
 
