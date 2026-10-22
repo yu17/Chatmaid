@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from chatmaid import __version__
+from chatmaid.cloud.base import CLOUD_SCHEMA, CloudError
+from chatmaid.cloud.registry import make_backend
 from chatmaid.config import ConfigError, read_token
 from chatmaid.config import load as load_config
 from chatmaid.llm.base import LLMError
@@ -340,6 +342,32 @@ def register_watch(subparsers) -> None:
     p.set_defaults(handler=_watch_command)
 
 
+_CLOUD_CHECK_PROMPT = (
+    'Reply with text "ok" and a one-word rationale. '
+    "Keep placeholders like [PERSON_1] verbatim: [PERSON_1] says hi."
+)
+
+
+def _cloud_check_command(args: argparse.Namespace) -> int:
+    cfg = load_config(Path(args.config))
+    try:
+        backend = make_backend(cfg, args.backend)
+        result = backend.complete(_CLOUD_CHECK_PROMPT, CLOUD_SCHEMA)
+    except CloudError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    print(f"backend={backend.name} model={backend.model}")
+    print(f"text: {result.get('text')}")
+    print(f"rationale: {result.get('rationale')}")
+    return 0
+
+
+def register_cloud_check(subparsers) -> None:
+    p = subparsers.add_parser("cloud-check", help="send a harmless canned prompt through a cloud CLI")
+    p.add_argument("--backend", choices=["codex", "claude"], default=None)
+    p.set_defaults(handler=_cloud_check_command)
+
+
 def build_parser() -> tuple[argparse.ArgumentParser, argparse._SubParsersAction]:
     parser = argparse.ArgumentParser(prog="chatmaid")
     parser.add_argument("--version", action="store_true", help="print version and exit")
@@ -354,6 +382,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, argparse._SubParsersAction]
     register_show(subparsers)
     register_lookup(subparsers)
     register_watch(subparsers)
+    register_cloud_check(subparsers)
     return parser, subparsers
 
 
