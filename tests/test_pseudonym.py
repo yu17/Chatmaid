@@ -59,3 +59,15 @@ def test_deny_list_for_includes_owner_and_participants(ingested_env):
     for pair in [("Jiaqi", "PERSON"), ("fishy", "PERSON"), ("me@x.org", "EMAIL"),
                  ("ann@x.org", "EMAIL"), ("Ann", "PERSON")]:
         assert pair in deny
+
+
+def test_name_inside_email_local_part_does_not_split_the_address():
+    p = Pseudonymizer([("ann", "PERSON")])
+    assert p.redact("write to lee.ann@x.org") == "write to [EMAIL_1]"
+    assert p.mapping == {"[EMAIL_1]": "lee.ann@x.org"}
+
+
+def test_name_with_punctuation_or_whitespace_is_matched():
+    p = Pseudonymizer([("John (Acme)", "PERSON"), ("Ann ", "PERSON")])
+    assert p.redact("John (Acme) and Ann met") == "[PERSON_1] and [PERSON_2] met"
+    assert p.redact("Annie") == "Annie"

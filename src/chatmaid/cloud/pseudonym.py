@@ -26,11 +26,12 @@ class Pseudonymizer:
         self._redact_amounts = redact_amounts
         self._kinds: dict[str, str] = {}  # lowercase original -> kind
         for original, kind in deny:
-            if len(original) >= 2:
+            original = original.strip()
+            if len(original) >= 2 and kind != "EMAIL":  # EMAIL_RE covers addresses
                 self._kinds.setdefault(original.lower(), kind)
         originals = sorted(self._kinds, key=len, reverse=True)
         parts = [
-            rf"\b{re.escape(o)}\b" if o.isascii() else re.escape(o) for o in originals
+            rf"(?<!\w){re.escape(o)}(?!\w)" if o.isascii() else re.escape(o) for o in originals
         ]
         self._deny_re = re.compile("|".join(parts), re.IGNORECASE) if parts else None
         self._placeholders: dict[tuple[str, str], str] = {}
@@ -67,9 +68,9 @@ class Pseudonymizer:
         return self._placeholder(k, found) if k else found
 
     def redact(self, text: str) -> str:
+        text = self._sub(text, EMAIL_RE, lambda s: "EMAIL")  # first: names inside addresses
         if self._deny_re:
             text = self._sub(text, self._deny_re, lambda s: self._kinds[s.lower()])
-        text = self._sub(text, EMAIL_RE, lambda s: "EMAIL")
         text = self._sub(text, PHONE_RE, lambda s: None if _ISO_DATE_RE.match(s) else "PHONE")
         if self._redact_amounts:
             text = self._sub(text, AMOUNT_RE, lambda s: "AMOUNT")
