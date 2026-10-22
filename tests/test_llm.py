@@ -68,20 +68,3 @@ def test_lmstudio_client_think_false_prefills_and_skips_response_format(monkeypa
     assert [m["role"] for m in captured["messages"]] == ["system", "user"]
 
 
-def test_lmstudio_client_think_false_prefills_and_skips_response_format(monkeypatch):
-    captured = {}
-
-    class FakeCompletions:
-        def create(self, **kw):
-            captured.update(kw)
-            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="{}"))])
-
-    c = LMStudioClient("http://127.0.0.1:1/v1", "tok")
-    monkeypatch.setattr(c._client.chat, "completions", FakeCompletions())
-    c.complete(system="s", user="u", model="m", json_schema={"type": "object"}, think=False)
-    assert "response_format" not in captured
-    assert captured["messages"][-1] == {"role": "assistant", "content": "<think>\n\n</think>\n\n"}
-    captured.clear()
-    c.complete(system="s", user="u", model="m", json_schema={"type": "object"}, think=True)
-    assert captured["response_format"]["json_schema"]["strict"] is True
-    assert [m["role"] for m in captured["messages"]] == ["system", "user"]

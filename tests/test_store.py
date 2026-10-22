@@ -137,16 +137,6 @@ def test_set_tracked_excludes_from_needing_summary(store):
     assert len(store.conversations(needing_summary=True)) == 1
 
 
-def test_set_tracked_excludes_from_needing_summary(store):
-    cid = store.upsert_conversation("email", "k-trk", "t", "thread")
-    assert [r["id"] for r in store.conversations(needing_summary=True)] == [cid]
-    store.set_tracked(cid, False)
-    assert store.conversations(needing_summary=True) == []
-    assert [r["id"] for r in store.conversations()] == [cid]
-    store.set_tracked(cid, True)
-    assert len(store.conversations(needing_summary=True)) == 1
-
-
 def test_search_messages_filters_and_accessors(ingested_env):
     s = ingested_env.store
     rows = s.search_messages(text="hello")
