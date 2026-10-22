@@ -284,13 +284,7 @@ class ReplyFlow:
             names = []
         deny += [(n, "PERSON") for n in names]
         p = Pseudonymizer(deny, redact_amounts=self.cfg.cloud.redact_amounts)
-        payload = (
-            prompts.load("cloud_refine").system
-            + "\n\n## Previous draft\n" + p.redact(previous)
-            + "\n\n## Owner's feedback\n" + (p.redact(comment) if comment else "(none)")
-            + "\n\n## Conversation summary\n" + (p.redact(ctx.summary) or "(none)")
-            + "\n\n## Message being answered\n" + p.redact(ctx.message[:1500])
-        )
+        payload = self._cloud_payload(p, previous, comment, ctx)
         store = self.store
         with store.transaction():
             call_id = store.add_cloud_call(
@@ -302,6 +296,22 @@ class ReplyFlow:
                 {"backend": b.name, "draft_id": draft_id, "chars": len(payload)},
             )
         return CloudProposal(call_id, b.name, b.model, payload)
+
+    @staticmethod
+    def _cloud_payload(
+        p: Pseudonymizer, previous: str, comment: str | None, ctx: ReplyContext
+    ) -> str:
+        """Assemble the payload; the message is redacted whole, then cut, so no fragment leaks."""
+        excerpt = p.redact(ctx.message)[:1500]
+        if excerpt.rfind("[") > excerpt.rfind("]"):
+            excerpt = excerpt[: excerpt.rfind("[")]  # the cut landed inside a placeholder
+        return (
+            prompts.load("cloud_refine").system
+            + "\n\n## Previous draft\n" + p.redact(previous)
+            + "\n\n## Owner's feedback\n" + (p.redact(comment) if comment else "(none)")
+            + "\n\n## Conversation summary\n" + (p.redact(ctx.summary) or "(none)")
+            + "\n\n## Message being answered\n" + excerpt
+        )
 
     def _proposed_call(self, call_id: int) -> sqlite3.Row:
         call = self.store.cloud_call(call_id)
@@ -344,19 +354,28 @@ class ReplyFlow:
         if unknown:
             rationale += f" [unknown placeholders: {', '.join(unknown)}]"
         draft_id = call["draft_id"]
-        with store.transaction():
-            store.set_cloud_call_status(
-                call_id, "sent", consented_at=self.now(), response=response,
-                response_hash=hashlib.sha256(response.encode()).hexdigest(),
-            )
-            vid = store.add_draft_version(
-                draft_id, round=store.next_round(draft_id), candidate=1,
-                origin=f"cloud:{call['backend']}", text=text, rationale=rationale,
-                comment=call["comment"], cloud_call_id=call_id,
-            )
+        try:
+            with store.transaction():
+                store.set_cloud_call_status(
+                    call_id, "sent", consented_at=self.now(), response=response,
+                    response_hash=hashlib.sha256(response.encode()).hexdigest(),
+                )
+                vid = store.add_draft_version(
+                    draft_id, round=store.next_round(draft_id), candidate=1,
+                    origin=f"cloud:{call['backend']}", text=text, rationale=rationale,
+                    comment=call["comment"], cloud_call_id=call_id,
+                )
+                store.log_event(
+                    "cloud", "sent", str(call_id), {"version_id": vid, "unknown_placeholders": unknown}
+                )
+        except Exception as e:
+            # the payload already left the machine: keep the audit trail, forbid a re-send
+            store.set_cloud_call_status(call_id, "failed", error=f"stored after send failed: {e!r}")
             store.log_event(
-                "cloud", "sent", str(call_id), {"version_id": vid, "unknown_placeholders": unknown}
+                "cloud", "failed", str(call_id),
+                {"backend": call["backend"], "error": f"stored after send failed: {e!r}"},
             )
+            raise
         return vid
 
     def decline_cloud(self, call_id: int) -> None:

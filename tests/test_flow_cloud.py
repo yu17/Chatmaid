@@ -169,3 +169,47 @@ def test_send_on_resolved_draft_is_declined_without_a_call(flow_env):
     assert call["error"] == "draft no longer pending"
     assert backend.prompts == []
     assert len(env.store.draft_versions(did)) == 2
+
+
+def test_excerpt_boundary_does_not_leak_a_cut_address(flow_env):
+    env = flow_env
+    body = "x" * 1486 + " jsmith@example.org and +44 20 7946 0958"
+    env.arrive("100", body=body)
+    did = env.store.drafts()[0]["id"]
+    payload = env.flow.propose_cloud(did).payload
+    assert "jsmith" not in payload
+    assert "example" not in payload
+    assert payload.rfind("[") <= payload.rfind("]")
+    tail = payload.split("## Message being answered\n")[1]
+    assert tail.rfind("[") <= tail.rfind("]")
+
+
+def test_store_failure_after_send_marks_call_failed(flow_env, monkeypatch):
+    env = flow_env
+    did = setup(env)
+    backend = FakeCloud("codex", "m", {"text": "[PERSON_1] ok", "rationale": "ok"})
+    with_backend(env, backend)
+    p = env.flow.propose_cloud(did)
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(env.store, "add_draft_version", boom)
+    with pytest.raises(RuntimeError):
+        env.flow.send_cloud(p.call_id)
+    call = env.store.cloud_call(p.call_id)
+    assert call["status"] == "failed"
+    assert "boom" in call["error"]
+    assert backend.prompts == [p.payload]
+    assert len(env.store.draft_versions(did)) == 2
+    assert any(e["kind"] == "failed" for e in env.store.events(limit=20))
+
+
+def test_tagged_name_is_redacted(flow_env):
+    env = flow_env
+    env.llm.responses["pii_tag"] = '{"persons":["Zed"]}'
+    did = setup(env, "Tell Zed that Friday works.")
+    p = env.flow.propose_cloud(did)
+    assert "Zed" not in p.payload
+    mapping = json.loads(env.store.cloud_call(p.call_id)["mapping_json"])
+    assert any(k.startswith("[PERSON_") and v == "Zed" for k, v in mapping.items())
