@@ -88,3 +88,9 @@ def test_scan_new_skips_folder_without_table(fake_env, caplog):
 
 def test_local_maildir_sent_is_included(fake_env):
     assert any(m.ref.account == "local" and m.is_owner for m in fake_env.connector.iter_messages())
+
+
+def test_iter_messages_after_skips_checkpointed_uids(fake_env):
+    msgs = fake_env.connector.iter_messages(after={"a1/INBOX": 1})
+    inbox = [m.ref.uid for m in msgs if m.ref.folder == "INBOX"]
+    assert inbox == ["2"]

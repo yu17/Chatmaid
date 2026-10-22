@@ -213,3 +213,12 @@ def fake_env(tmp_path, request):
         config=config, config_path=config_path, cfg=cfg, accounts=accounts, owner=owner,
         connector=connector, cache_dir=cache_dir, db_path=cache_dir / "a1" / "folders.db",
     )
+
+
+@pytest.fixture
+def ingested_env(fake_env, store):
+    from chatmaid.init.pipeline import InitOptions, InitPipeline
+    from chatmaid.llm.fake import FakeLLM
+
+    InitPipeline(store, fake_env.connector, FakeLLM(), fake_env.config).ingest(InitOptions())
+    return SimpleNamespace(**vars(fake_env), store=store)

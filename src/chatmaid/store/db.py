@@ -309,6 +309,12 @@ class Store:
             (task, key, json.dumps(state, ensure_ascii=False), _now()),
         )
 
+    def checkpoints(self, task: str) -> dict[str, dict]:
+        rows = self._conn.execute(
+            "SELECT key, state_json FROM checkpoint WHERE task = ?", (task,)
+        ).fetchall()
+        return {r["key"]: json.loads(r["state_json"]) for r in rows}
+
     # --- embeddings ---
 
     def upsert_embedding(self, kind: str, ref_id: int, text_hash: str, vector: list[float]) -> None:

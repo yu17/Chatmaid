@@ -9,7 +9,9 @@ from chatmaid.model import NormalizedMessage, SourceRef
 class Connector(Protocol):
     name: str
 
-    def iter_messages(self, *, since: int | None = None) -> Iterator[NormalizedMessage]: ...
+    def iter_messages(
+        self, *, since: int | None = None, after: dict[str, int] | None = None
+    ) -> Iterator[NormalizedMessage]: ...
 
     def fetch(self, ref: SourceRef) -> NormalizedMessage: ...
 

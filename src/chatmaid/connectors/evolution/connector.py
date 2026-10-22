@@ -52,6 +52,14 @@ class EvolutionConnector:
         self._owner = owner
         self._caches: dict[str, EvolutionCache] = {}
 
+    @property
+    def owner(self) -> OwnerIdentity:
+        return self._owner
+
+    @property
+    def accounts(self) -> list[EvolutionAccount]:
+        return list(self._accounts)
+
     # -- resources -------------------------------------------------------
     def _cache(self, account_uid: str) -> EvolutionCache:
         if account_uid not in self._caches:
@@ -116,13 +124,16 @@ class EvolutionConnector:
         return self._from_parsed(ref, parsed, 0, len(data), parsed.subject, True, ())
 
     # -- Connector protocol ----------------------------------------------
-    def iter_messages(self, *, since: int | None = None) -> Iterator[NormalizedMessage]:
+    def iter_messages(
+        self, *, since: int | None = None, after: dict[str, int] | None = None
+    ) -> Iterator[NormalizedMessage]:
+        after = after or {}
         for account in self._accounts:
             cache = self._cache(account.uid)
             seen: set[str] = set()
             for folder in self._folders(account):
                 try:
-                    for row in cache.iter_rows(folder):
+                    for row in cache.iter_rows(folder, after_uid=after.get(f"{account.uid}/{folder.name}")):
                         msg = self._from_row(account, cache, folder, row)
                         if msg.message_id is not None:
                             if msg.message_id in seen:
