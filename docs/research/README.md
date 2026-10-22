@@ -61,4 +61,4 @@ Prior art
   is an official bot in servers the owner controls; bots can never read DMs.
 - Email is easy: IMAP IDLE plus a Drafts folder plus SMTP on approval.
 
-The verified cloud CLI invocations (codex and claude, tool-less and stateless) are in [`docs/superpowers/plans/2026-10-22-phase1b-reply-drafts.md`](../superpowers/plans/2026-10-22-phase1b-reply-drafts.md), Global Constraints.
+The verified cloud CLI invocations (codex with every tool feature disabled, claude with `--tools ""`; both without persisted state) are in [`docs/superpowers/plans/2026-10-22-phase1b-reply-drafts.md`](../superpowers/plans/2026-10-22-phase1b-reply-drafts.md), Global Constraints.

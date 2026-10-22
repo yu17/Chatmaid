@@ -346,7 +346,7 @@ Approve in phase 1 means "record approval"; nothing is sent.
 - Three-tier layout with no copied mail: the index holds references and
   derived fields; text is read from the source on demand.
 - Email built together with the daemon core as its first source; UI last.
-- Cloud CLIs run tool-less and stateless and sit behind a provider interface.
+- Cloud CLIs run with their tools explicitly disabled (codex: every tool feature off, since `-s read-only` alone still allows filesystem reads; claude: `--tools ""`) and without persisted state, behind a provider interface.
 - `ccx lmstudio` kept as an optional batch runner, not part of the hot path.
 - Qwen3.5-35B-A3B as the default drafting model, Qwen3-4B for triage, pending
   a private eval.

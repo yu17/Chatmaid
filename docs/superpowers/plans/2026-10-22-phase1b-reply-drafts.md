@@ -15,14 +15,14 @@
 - Everything in plan 1a's Global Constraints still holds: read-only sources, no body copies in the index beyond 200-character previews, hot window 365 days, `data/` layout, token handling, thinking control, stable thread keys.
 - Nothing sends mail, writes to Evolution, or writes to a mail server. "Approve" records approval only.
 - Cloud consent (spec §9, §11.5): a cloud call exists only as a stored `cloud_call` row created by `propose_cloud`; `send_cloud` transmits that row's `payload` byte-for-byte and nothing else; no code path calls a backend without a prior proposal; the CLI prints the payload before asking. The watcher never calls a cloud backend.
-- What crosses to the cloud is the pseudonymized previous draft, the owner's comment, the conversation summary and at most 1,500 characters of the message being answered. Placeholders are `[PERSON_n]`, `[EMAIL_n]`, `[PHONE_n]`, `[AMOUNT_n]` (amounts only when `cloud.redact_amounts = true`; research: keep amounts and dates unless flagged). The placeholder map is stored in `cloud_call.mapping_json` (local, unencrypted per §11) and never sent.
-- Cloud CLIs run tool-less and stateless, verified 2026-10-22 on this machine (codex-cli 0.163.0, Claude Code 2.1.308):
-  - codex: `codex exec --ephemeral --ignore-user-config --ignore-rules -s read-only -C <empty temp dir> --skip-git-repo-check --color never --output-schema <schema file> -o <out file> -m <model> <prompt>`; the out file holds the schema-shaped JSON. `--ignore-user-config` skips the owner's hooks and MCP servers (auth still comes from `CODEX_HOME`) and drops the owner's model default, so `-m` is always passed; default `cloud.codex_model = "gpt-6-astra"` (the owner's configured model).
+- What crosses to the cloud is the pseudonymized previous draft, the owner's comment, the conversation summary and at most 1,500 characters of the message being answered. Placeholders are `[PERSON_n]`, `[EMAIL_n]`, `[URL_n]`, `[PHONE_n]`, `[AMOUNT_n]` (amounts only when `cloud.redact_amounts = true`; research: keep amounts and dates unless flagged); redaction order is email, URL/domain, deny-list names (full names, then capitalised name parts), phone, amount (rulings R6, R12, M5), and the small-model name tagger runs over everything that leaves the machine (R19). The placeholder map is stored in `cloud_call.mapping_json` (local, unencrypted per §11) and never sent.
+- Cloud CLIs run with their tools disabled and without persisted state, verified 2026-10-22 on this machine (codex-cli 0.163.0, Claude Code 2.1.308). Note (ruling R14): codex's `-s read-only` sandbox alone still lets model-run shell commands read the whole filesystem, so every tool feature is disabled explicitly:
+  - codex: `codex exec --ephemeral --ignore-user-config --ignore-rules --disable shell_tool --disable unified_exec --disable code_mode_host --disable apps --disable multi_agent --disable plugins --disable browser_use --disable computer_use -s read-only -C <empty temp dir> --skip-git-repo-check --color never --output-schema <schema file> -o <out file> -m <model> <prompt>`; the out file holds the schema-shaped JSON. `--ignore-user-config` skips the owner's hooks and MCP servers (auth still comes from `CODEX_HOME`) and drops the owner's model default, so `-m` is always passed; default `cloud.codex_model = "gpt-6-astra"` (the owner's configured model).
   - claude: `claude -p --tools "" --no-session-persistence --setting-sources "" --disable-slash-commands --strict-mcp-config --output-format json --json-schema <schema json> [--model <m>] <prompt>` with cwd = an empty temp dir; the stdout envelope's `structured_output` is the result, `is_error`/`subtype` signal failure. **`--bare` is not used**: it restricts auth to `ANTHROPIC_API_KEY` and the owner is logged in through OAuth (the design's §7 command line is corrected in Task 13). Both subprocesses get `stdin=DEVNULL`, a timeout of `cloud.timeout_s`, and an environment without `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` (otherwise claude refuses to start inside a Claude Code session).
 - Model roles: triage and PII tagging `model_small` with `grammar=True`; drafting and revising `cfg.draft_model` (`model_main` unless `draft.model_role = "heavy"`) with `grammar=False`; summary updates as in digest (chunk `model_small` grammar, merge `model_main` prefill); embeddings `model_embedding`.
 - The LLM flag `think` is renamed `grammar` (Task 1): `grammar=True` sends the JSON-schema `response_format` and no prefill (non-thinking models); `grammar=False` sends the empty-think prefill and no `response_format` (thinking models). Semantics are unchanged from ruling R9.
-- One pending draft per conversation: a new incoming message in a conversation with a pending draft marks it `superseded` before drafting again.
-- Draft statuses: `pending`, `approved`, `edited`, `dismissed`, `superseded`. Cloud call statuses: `proposed`, `declined`, `sent`, `failed`. Triage categories: `needs_reply`, `informational`, `bulk`, `system`, `unknown`. Conversation tiers: `family`, `work`, `finance`, `casual`, `bulk`.
+- One pending draft per conversation: a new incoming message in a conversation with a pending draft marks it `superseded` in the same transaction that creates the new draft (M2); a conversation merge keeps the newest pending draft (C1). Incoming mail older than `draft.max_age_days` (14) is triaged `informational` by rule without a model call (R17).
+- Draft statuses: `pending`, `approved`, `edited`, `dismissed`, `superseded`. Cloud call statuses: `proposed`, `declined`, `sending` (consent recorded, backend call in flight; never re-sendable, ruling R15), `sent`, `failed`. Triage categories: `needs_reply`, `informational`, `bulk`, `system`, `unknown`. Conversation tiers: `family`, `work`, `finance`, `casual`, `bulk`.
 - Draft texts (generated by chatmaid) are stored in full; the owner's own sent text is referenced by `outcome_ref` plus a 200-character `outcome_preview`, never copied.
 - Real-model smoke tests (Task 13) run against a scratch index in the worktree's own `data/` directory, never against the main checkout's `data/`; cloud backends are exercised only through `cloud-check`'s canned payload, never with real content.
 - Commit after every task with the message prefix shown in the task; `uv run pytest -q -W error` must pass before each commit.
@@ -785,3 +785,34 @@ git commit -m "docs: phase 1b draft flow, cloud backends and consent rule"
 ```
 
 Report the measurements from Steps 2–5 in the task's completion message.
+
+---
+
+## Rulings made during execution (2026-10-22)
+
+The SDD ledger recorded these; the plan text above was amended where they change it.
+
+- R1 (Task 7): the history-lookup test asserts the hit line that the vector path returns.
+- R2 (Task 8): phone candidates shaped like dates are kept; superseded by I1/R22 (`_looks_like_phone` strips one leading date and needs 7 digits).
+- R3 (Task 2): every failure-injecting watcher test keeps `handle_trigger`; all other zero-count assertions use `_handle`.
+- R4 (Task 5): triage's "Conversation so far" is the conversation row's summary.
+- R5 (Task 6): the fixture's single-chunk summary is `S1`.
+- R6 (Task 8): emails are redacted before names so a name inside a local part cannot split an address.
+- R7 (Tasks 6/10/11): `draft.context_json` holds 200-character previews only; regenerate and propose rebuild the live context from the source (`ReplyFlow._context_for`).
+- R8 (Task 11): `send_cloud` on a draft that is no longer pending declines the call and raises.
+- R9 (Task 11): the message excerpt is redacted in full, then cut to 1,500 characters without splitting a placeholder.
+- R10 (Task 11): a store failure after a transmitted payload marks the call `failed` with the error.
+- R11 (Task 13): the scratch `data/` stays in the worktree (gitignored) until the worktree is removed.
+- R12 (Task 13): name parts and URLs/domains are redacted; the tagger covers the whole payload.
+- R13 (Task 13, plan 1a defect): the Evolution connector no longer deduplicates by Message-ID; the store does, so ingest watermarks cover every row.
+- R14 (final review C2): codex runs with the eight tool features disabled (see Global Constraints).
+- R15 (I3): `sending` status with `consented_at` is written before the backend call; interrupted sends are audited as `failed`.
+- R16 (I5): approval detection strips quoted history and signatures and accepts a prefix match.
+- R17 (I6): `draft.max_age_days = 14` age rule in triage.
+- R18 (I4 minimum): the watcher stops between refs on request and holds back watermarks for unprocessed refs; watch output and failure events carry the message row id; an untriaged-message queue is deferred to plan 1c.
+- R19 (I2): the name tagger runs over the full message, not the raw 1,500-character prefix.
+- R20 (M1): schema-ladder steps run inside `BEGIN IMMEDIATE` with a `user_version` re-check.
+- R21: commit trailers name the model that authored each commit.
+- R22 (I1): `PHONE_RE` ends with `(?!\w|\.\w)` so a number before a sentence-ending period is still redacted.
+
+Deferred to plan 1c (parked with rulings in the ledger): the `cli.py`/`flow.py` splits, the untriaged-message retry queue, the stop-time pending-counter loss, `drafts`/`draft show` opening the connector without a `ConfigError` handler, over-redaction by `PHONE_RE` across newlines, the unbounded prefix match in approval detection, assorted test-coverage gaps listed per task in the ledger.
