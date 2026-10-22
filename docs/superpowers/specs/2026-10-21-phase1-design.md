@@ -79,11 +79,15 @@ Anti-goals (would make this a failure even if it "works")
   is unverified. Windows: broke at 4.1.13.65, so a Windows route must pin
   ≤4.1.12.
 - The workstation has no QEMU/libvirt installed and no WeChat Linux client.
-  `/mnt/Apps` is 91% full (about 179 GB free); the WeChat media tree alone is
-  1.4 GB on the Mac today and will grow after migration.
+  `/mnt/Apps` is 91% full (about 179 GB free). The MacBook has 96 GB free and
+  its whole WeChat data tree is 1.6 GB today (recent messages only); the
+  post-migration size is unknown until the owner reads it off the phone
+  (see 9.2).
 - Evolution 3.62.1 is running with 9 cached mail accounts (5 IMAP, 3 Exchange
-  Web Services, 1 Microsoft 365) and a 17 GB cache. libcamel and EDataServer are
-  importable from Python through GObject introspection.
+  Web Services, 1 Microsoft 365) and a 17 GB cache. The local "On This
+  Computer" store is a 100 MB Maildir holding 307 sent messages and nothing
+  else. libcamel and EDataServer are importable from Python through GObject
+  introspection.
 - Owner's rule: read-only first; no write or edit test begins without telling
   the owner and getting a go.
 
@@ -207,7 +211,13 @@ stay as plan B if a body is ever needed that the cache does not hold.
   only in the data directory, never logged, never committed.
 - All connectors open sources read-only (SQLite `mode=ro`, `immutable=1` where
   safe; IMAP would use EXAMINE and BODY.PEEK if ever used).
-- Runs as the owner's user on the workstation; no daemons until phase 2.
+- Runs as the owner's user on the workstation. Phase 1 ships a re-runnable
+  incremental import command plus a foreground `watch` command that subscribes
+  to Evolution's new-mail signal (inotify fallback) and imports as mail
+  arrives. No systemd unit or background service until phase 2.
+- Acceptance is checked with a minimal read CLI: list conversations, show one
+  conversation, search text. Without it only someone writing SQL could verify
+  the deliverable.
 
 ## 9. Decisions the owner must make
 
@@ -216,26 +226,35 @@ Ordered by how much they change what gets built.
 1. **WeChat one-shot route.** Mac-first (recommended), Linux client, or Windows
    VM. Mac-first needs: permission to run a key-extraction tool on the Mac with
    WeChat open, and the owner to run the migration from the phone.
-2. **Where the always-on WeChat client will live later** (affects sending and
+2. **Expected WeChat data volume.** On the phone, `设置 → 通用 → 存储空间`
+   shows the chat-data size. Under about 20 GB the import is a plain
+   copy, decrypt, import sequence; at 50 GB or more it needs staged copying
+   with cleanup or a different volume, since the workstation holds the
+   encrypted copy, a decrypted working copy, and decoded media (roughly two to
+   three times the source).
+3. **Where the always-on WeChat client will live later** (affects sending and
    live sync, not phase 1). Windows VM (owner's stated preference; needs QEMU
    install, a Windows 11 IoT LTSC evaluation image or a licensed one, a
    ≤4.1.12 build, and accepts displacing the Mac login) versus the MacBook
    (AppleScript sending, no VM) versus the Linux client (xdotool sending,
    immature). Can be deferred.
-3. **Email accounts in scope, and offline download.** All nine cached accounts
+4. **Email accounts in scope, and offline download.** All nine cached accounts
    or a subset (the largest single cache is 12 GB). Exchange and Microsoft 365
    accounts are cached in the same format, so the cache route covers them
    without OAuth work. For full bodies, the owner enables "Download messages
    for offline usage" on the in-scope accounts in Evolution; otherwise the
    connector sees bodies only for mail opened in the last 7 days.
-4. **Language and stack.** My call is Python 3.14 with uv (see 10); confirm or
+5. **Language and stack.** My call is Python 3.14 with uv (see 10); confirm or
    override.
-5. **Data directory and size budget.** Where the store and media go (the
-   `/mnt/Apps` volume is 91% full), and whether the data directory must be
-   encrypted at rest.
-6. **Go/no-go for each write-capable step**, which I will request individually:
-   phone migration, key tool on the Mac, and later anything that drafts or
-   sends.
+6. **Data directory and encryption at rest.** Where the store and media go
+   (the `/mnt/Apps` volume is 91% full). My default for encryption is
+   filesystem-level (the owner's LUKS, fscrypt or gocryptfs; the code writes
+   plaintext). Application-level encryption (SQLCipher store, encrypted media
+   files) changes every database open and all media handling and is cheap to
+   retrofit for the database but not for media, so say now if it is required.
+7. **Go/no-go for each write-capable step**, which I will request individually:
+   phone migration, key tool on the Mac, enabling offline download in
+   Evolution, and later anything that drafts or sends.
 
 ## 10. Calls I made (check these while reading)
 
@@ -250,6 +269,18 @@ Ordered by how much they change what gets built.
   parser fix never requires re-extracting from WeChat.
 - Phase 1 excludes all sending and all cloud calls, matching the owner's
   read-only rule.
+- Email scope defaults to all nine cached accounts plus the local Maildir Sent
+  folder (307 messages, read with Python's `mailbox` module), because that is
+  all the local store contains.
+- A foreground `watch` command rather than a service, and a minimal read CLI
+  as the acceptance tool (section 8).
+- Encryption at rest left to the filesystem unless the owner says otherwise
+  (section 9.6).
+- WeChat import is planned Mac-first with the Linux client as a branch taken
+  only if the key test fails. The Linux branch has an untested gap: research
+  confirms the per-account image key (needed to decode `.dat` images) only via
+  the macOS tool; whether the Linux key tool yields it is unknown and needs a
+  spike before that branch is relied on.
 
 ## 11. What is left to the builder
 
