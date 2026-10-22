@@ -25,6 +25,10 @@ def _now() -> int:
     return int(time.time())
 
 
+def _like_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class Store:
     def __init__(self, path: Path, *, embedding_dim: int):
         self._conn = sqlite3.connect(path, isolation_level=None)
@@ -253,14 +257,19 @@ class Store:
         return [(SourceRef.from_key(r["ref_key"]), r["id"]) for r in rows]
 
     def messages_for(
-        self, conversation_id: int, *, since: int | None = None, limit: int = 50
+        self,
+        conversation_id: int,
+        *,
+        since: int | None = None,
+        limit: int = 50,
+        newest_first: bool = False,
     ) -> list[sqlite3.Row]:
         sql = "SELECT * FROM message WHERE conversation_id = ?"
         params: list = [conversation_id]
         if since is not None:
             sql += " AND sent_at >= ?"
             params.append(since)
-        sql += " ORDER BY sent_at, id LIMIT ?"
+        sql += (" ORDER BY sent_at DESC, id DESC" if newest_first else " ORDER BY sent_at, id") + " LIMIT ?"
         params.append(limit)
         return self._conn.execute(sql, params).fetchall()
 
@@ -279,11 +288,11 @@ class Store:
         )
         params: list = []
         if text:
-            sql += " AND (m.subject LIKE ? OR m.preview LIKE ?)"
-            params += [f"%{text}%"] * 2
+            sql += " AND (m.subject LIKE ? ESCAPE '\\' OR m.preview LIKE ? ESCAPE '\\')"
+            params += [f"%{_like_escape(text)}%"] * 2
         if sender:
-            sql += " AND (i.address LIKE ? OR i.display_name LIKE ?)"
-            params += [f"%{sender}%"] * 2
+            sql += " AND (i.address LIKE ? ESCAPE '\\' OR i.display_name LIKE ? ESCAPE '\\')"
+            params += [f"%{_like_escape(sender)}%"] * 2
         if since is not None:
             sql += " AND m.sent_at >= ?"
             params.append(since)

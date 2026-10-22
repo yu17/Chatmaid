@@ -158,3 +158,38 @@ def test_search_messages_filters_and_accessors(ingested_env):
     assert s.memory(99999) is None
     assert s.participant_labels(cid)
     assert s.identity_label(None) == "?"
+
+
+def _add(store, cid, sid, sample_message, uid, subject, sent_at):
+    from dataclasses import replace
+
+    from chatmaid.model import SourceRef
+
+    ref = SourceRef("evolution", "acct1", "INBOX", uid)
+    store.upsert_message(
+        cid,
+        replace(sample_message, ref=ref, message_id=f"<{uid}@x>", subject=subject,
+                text=subject, preview=subject, sent_at=sent_at),
+        sid,
+    )
+
+
+def test_messages_for_newest_first(store, sample_message):
+    cid = store.upsert_conversation("email", "k1", "Hi", "thread")
+    sid = store.upsert_identity("email", "a@x.org", None)
+    for i in range(4):
+        _add(store, cid, sid, sample_message, str(i), f"m{i}", 1000 + i)
+    rows = store.messages_for(cid, limit=3, newest_first=True)
+    assert [r["sent_at"] for r in rows] == [1003, 1002, 1001]
+    assert [r["sent_at"] for r in store.messages_for(cid, limit=3)] == [1000, 1001, 1002]
+
+
+def test_search_messages_escapes_like_wildcards(store, sample_message):
+    cid = store.upsert_conversation("email", "k1", "Hi", "thread")
+    sid = store.upsert_identity("email", "a@x.org", None)
+    _add(store, cid, sid, sample_message, "1", "50% off", 1000)
+    _add(store, cid, sid, sample_message, "2", "500 off", 1001)
+    _add(store, cid, sid, sample_message, "3", "foo_bar", 1002)
+    _add(store, cid, sid, sample_message, "4", "fooxbar", 1003)
+    assert [r["subject"] for r in store.search_messages(text="50% off")] == ["50% off"]
+    assert [r["subject"] for r in store.search_messages(text="foo_bar")] == ["foo_bar"]

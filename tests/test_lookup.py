@@ -29,3 +29,44 @@ def test_search_history_skips_messages_gone_from_source(digested_env, monkeypatc
 
     monkeypatch.setattr(digested_env.connector, "fetch", gone)
     assert search_history(digested_env.store, digested_env.connector, None, query="hello") == []
+
+
+def test_search_history_vector_path_uses_newest_messages(store, sample_message, tmp_path):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from chatmaid.model import SourceRef
+
+    cid = store.upsert_conversation("email", "k1", "Hi", "thread")
+    sid = store.upsert_identity("email", "a@x.org", None)
+    for i in range(4):
+        ref = SourceRef("evolution", "acct1", "INBOX", str(i))
+        store.upsert_message(
+            cid, replace(sample_message, ref=ref, message_id=f"<{i}@x>", sent_at=1000 + i), sid
+        )
+    llm = FakeLLM(dim=4)
+    store.upsert_embedding("conversation", cid, "h", llm.embed(["q"], model="e")[0])
+
+    class Conn:
+        def fetch(self, ref):
+            return replace(sample_message, ref=ref)
+
+    hits = search_history(store, Conn(), llm, query="zzz-nothing", embedding_model="e")
+    assert sorted(h.sent_at for h in hits) == [1001, 1002, 1003]
+
+
+def test_search_history_skips_candidate_on_sqlite_error(digested_env, monkeypatch):
+    import sqlite3
+
+    real = digested_env.connector.fetch
+    calls = []
+
+    def flaky(ref):
+        calls.append(ref)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("locked")
+        return real(ref)
+
+    monkeypatch.setattr(digested_env.connector, "fetch", flaky)
+    hits = search_history(digested_env.store, digested_env.connector, None, query="s")
+    assert len(calls) >= 2 and len(hits) == len(calls) - 1

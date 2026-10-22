@@ -1,6 +1,7 @@
 """Command-line entry point. Later tasks add commands via register_<name>(subparsers)."""
 
 import argparse
+import sqlite3
 import sys
 
 from datetime import datetime, timezone
@@ -213,11 +214,13 @@ def _lookup_command(args: argparse.Namespace) -> int:
             llm = LMStudioClient(cfg.lmstudio.base_url, read_token(cfg), timeout_s=cfg.lmstudio.timeout_s)
         except ConfigError as e:
             print(f"warning: {e}; falling back to metadata search only", file=sys.stderr)
-    accounts = load_accounts(cfg.email.evolution_config_dir, cfg.email.accounts)
-    owner = OwnerIdentity.from_accounts(accounts, cfg.owner.extra_addresses, cfg.owner.aliases)
-    connector = EvolutionConnector(cfg.email, accounts, owner)
-    store = _open_store(cfg)
+    connector = None
+    store = None
     try:
+        accounts = load_accounts(cfg.email.evolution_config_dir, cfg.email.accounts)
+        owner = OwnerIdentity.from_accounts(accounts, cfg.owner.extra_addresses, cfg.owner.aliases)
+        connector = EvolutionConnector(cfg.email, accounts, owner)
+        store = _open_store(cfg)
         hits = search_history(
             store, connector, llm, query=args.query, contact=args.contact,
             since=args.since, until=args.until, limit=args.limit,
@@ -226,9 +229,14 @@ def _lookup_command(args: argparse.Namespace) -> int:
     except LLMError as e:
         print(f"lookup failed: {e}", file=sys.stderr)
         return 1
+    except (sqlite3.Error, OSError) as e:
+        print(f"lookup failed: {e}", file=sys.stderr)
+        return 1
     finally:
-        store.close()
-        connector.close()
+        if store is not None:
+            store.close()
+        if connector is not None:
+            connector.close()
     for h in hits:
         snippet = h.snippet.replace("\n", " ")
         print(f"{_day(h.sent_at)}  {h.sender}  {h.subject}  \u2014  {snippet}")

@@ -1,5 +1,7 @@
 """History lookup: metadata search plus vector neighbours, verified against the source."""
 
+import logging
+import sqlite3
 from dataclasses import dataclass
 
 from chatmaid.connectors.base import Connector
@@ -8,6 +10,7 @@ from chatmaid.model import SourceRef
 from chatmaid.store import Store
 
 SNIPPET_LENGTH = 160
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -66,14 +69,15 @@ def search_history(
                 cid = memory["conversation_id"] if memory else None
             if cid is None:
                 continue
-            for row in store.messages_for(cid, limit=3):
+            for row in store.messages_for(cid, limit=3, newest_first=True):
                 add(row, score)
 
     hits: list[Hit] = []
     for row, score in candidates.values():
         try:
             msg = connector.fetch(SourceRef.from_key(row["ref_key"]))
-        except KeyError:
+        except (KeyError, OSError, sqlite3.Error) as e:
+            log.warning("skipping %s: %s", row["ref_key"], e)
             continue
         hits.append(
             Hit(
