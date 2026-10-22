@@ -85,7 +85,7 @@ tests/test_config.py … tests/test_daemon.py     one test module per source mod
 - `data/config.toml` written from `config.example.toml` with `email.*` paths pointing at the fixtures, `email.accounts = ["a1"]`, `owner.extra_addresses = ["me2@x.org"]`, `lmstudio.embedding_dim = 4`.
 - Returns `SimpleNamespace(config: Config, config_path: Path, cfg: EmailConfig, accounts, owner, connector, cache_dir, db_path = cache_dir/"a1"/"folders.db")`.
 
-`store` = `Store(tmp_path / "index.sqlite", embedding_dim=4)`. `ingested_env` = `fake_env` plus `store` after `InitPipeline(...).ingest(InitOptions())`. `digested_env` = `ingested_env` after `digest` and `embed` with `FakeLLM({"chunk_summary": ..., "rolling_summary": ...}, dim=4)` (the canned JSON from Task 10). `watch_env` = `ingested_env` plus `Watcher(store, connector, EventSource([db_path], enable_dbus=False))`, a `message(sender, to, folder)` helper returning a `NormalizedMessage` whose `is_owner` is computed through `owner.matches`, an `add_row(folder, *, uid, message_id, sender, to, date, body, dreceived=None, in_reply_to=None)` helper that appends one row plus body file to the fake cache (writable in tests; `dsent=date`, `dreceived=dreceived or date`, saved_count updated), and an `add_folder(name, *, time_mode=False)` helper that creates an empty folder table (ruling R14). The watcher's scan state starts from the ingest checkpoints when no watch state exists, so the first trigger after ingest routes nothing.
+`store` = `Store(tmp_path / "index.sqlite", embedding_dim=4)`. `ingested_env` = `fake_env` plus `store` after `InitPipeline(...).ingest(InitOptions())`. `digested_env` = `ingested_env` after `digest` and `embed` with `FakeLLM({"chunk_summary": ..., "rolling_summary": ...}, dim=4)` (the canned JSON from Task 10). `watch_env` = `ingested_env` plus `Watcher(store, connector, EventSource([db_path], enable_dbus=False))`, a `message(sender, to, folder)` helper returning a `NormalizedMessage` whose `is_owner` is computed through `owner.matches`, an `add_row(folder, *, uid, message_id, sender, to, date, body, dreceived=None, in_reply_to=None)` helper that appends one row plus body file to the fake cache (writable in tests; `dsent=date`, `dreceived=dreceived or date`, saved_count updated), and an `add_folder(name)` helper that creates an empty folder table (ruling R14; the folder's uid mode is detected from its first row, so there is no mode flag). The watcher's scan state starts from the ingest checkpoints when no watch state exists, so the first trigger after ingest routes nothing.
 
 ---
 
@@ -945,7 +945,7 @@ def test_handle_trigger_routes_and_logs(watch_env):
     assert watch_env.watcher.handle_trigger("timer") == 0
 
 def test_handle_trigger_time_mode_folder(watch_env):   # opaque uids: watermark is dreceived, inclusive boundary must not re-route
-    watch_env.add_folder("Exchange Inbox", time_mode=True)
+    watch_env.add_folder("Exchange Inbox")
     watch_env.watcher.handle_trigger("timer")
     watch_env.add_row("Exchange Inbox", uid="AQMkADMy1", message_id="<e1@x>", sender="bob@x.org", to="me@x.org", date=1_700_000_700, dreceived=1_700_000_700, body="hi")
     assert watch_env.watcher.handle_trigger("timer") == 1
