@@ -88,8 +88,13 @@ class ReplyFlow:
                 self.on_incoming(conversation_id, msg)
         except LLMError as e:
             kind = "owner_failed" if owner else "draft_failed"
-            log.warning("reply flow %s for %s: %s", kind, msg.ref.key(), e)
-            self.store.log_event("reply", kind, msg.ref.key(), {"error": str(e)})
+            row = self.store.message_by_ref(msg.ref.key())
+            message_id = row["id"] if row is not None else None
+            retry = f"; retry: chatmaid draft run --message {message_id}" if not owner else ""
+            log.warning("reply flow %s for message %s: %s%s", kind, message_id, e, retry)
+            self.store.log_event(
+                "reply", kind, msg.ref.key(), {"error": str(e), "message_id": message_id}
+            )
 
     # -- routine B: incoming mail ----------------------------------------
 

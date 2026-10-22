@@ -46,6 +46,7 @@ def test_cli_draft_run_and_list(cli_draft_env, capsys):
     out = capsys.readouterr().out.splitlines()
     assert out[0].split()[:3] == ["id", "conv", "status"]
     assert "pending" in out[1] and "test" in out[1]
+    assert "Sure, Friday works." in out[1]  # what `draft approve` approves, not candidate 2
 
 
 def test_cli_draft_run_applies_the_age_rule(old_mail_env, capsys):
@@ -123,3 +124,32 @@ def test_cli_watch_without_token_fails_cleanly(fake_env, capsys):
     assert "token" in capsys.readouterr().err.lower()
     parser, _ = build_parser()
     assert parser.parse_args(["watch", "--no-draft"]).no_draft is True
+
+
+def test_cli_draft_run_message_gone_from_cache(cli_draft_env, capsys, monkeypatch):
+    def gone(self, ref):
+        raise KeyError(ref)
+
+    monkeypatch.setattr("chatmaid.connectors.evolution.connector.EvolutionConnector.fetch", gone)
+    assert run(cli_draft_env, "draft", "run", "--message", str(cli_draft_env.row_id), "--fake-llm") == 1
+    err = capsys.readouterr().err
+    assert err == f"message {cli_draft_env.row_id} is no longer in the mail cache\n"
+
+
+@pytest.mark.parametrize("error", [EOFError, KeyboardInterrupt])
+def test_cli_cloud_prompt_eof_or_interrupt_declines(cli_draft_env, capsys, monkeypatch, error):
+    backend = FakeCloud(name="codex", model="m")
+    monkeypatch.setattr("chatmaid.cli.make_backend", lambda cfg, name: backend)
+    make_draft(cli_draft_env)
+    capsys.readouterr()
+
+    def no_answer(prompt=""):
+        raise error
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", no_answer)
+    assert run(cli_draft_env, "draft", "cloud", "1", "--fake-llm") == 0
+    assert capsys.readouterr().out.endswith("declined\n")
+    assert backend.prompts == []
+    run(cli_draft_env, "cloud-calls")
+    assert "declined" in capsys.readouterr().out

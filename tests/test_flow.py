@@ -287,6 +287,9 @@ def test_llm_failure_logs_draft_failed_and_keeps_message(flow_env):
     assert env.store.message_by_ref(SourceRef("evolution", "a1", "INBOX", "100").key()) is not None
     assert env.store.drafts(status=None) == []
     assert "draft_failed" in kinds(env)
+    ev = next(e for e in env.store.events(limit=50) if e["kind"] == "draft_failed")
+    row = env.store.message_by_ref(SourceRef("evolution", "a1", "INBOX", "100").key())
+    assert json.loads(ev["payload_json"])["message_id"] == row["id"]
 
 
 def test_dispatch_owner_route_never_drafts(flow_env):

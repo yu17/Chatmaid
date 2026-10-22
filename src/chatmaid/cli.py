@@ -350,7 +350,9 @@ def _watch_locked(args: argparse.Namespace, cfg) -> int:
         watcher = Watcher(store, connector, events)
 
         def show(kind: str, cid: int, msg) -> None:
-            print(f"{kind}  {cid}  {msg.sender.email}  {msg.subject}", flush=True)
+            row = store.message_by_ref(msg.ref.key())
+            mid = row["id"] if row is not None else "-"
+            print(f"{kind}  conv {cid}  msg {mid}  {msg.sender.email}  {msg.subject}", flush=True)
             if not args.no_draft:
                 flow.dispatch(kind, cid, msg)
 
@@ -400,17 +402,21 @@ def register_cloud_check(subparsers) -> None:
 
 def _drafts_command(args: argparse.Namespace) -> int:
     cfg = load_config(Path(args.config))
-    store = _open_store(cfg)
+    store, connector, flow = _open_flow(cfg, need_llm=False)
     try:
         print("id  conv  status  created  subject  text")
         status = None if args.status == "all" else args.status
         for d in store.drafts(status=status, limit=args.limit):
             msg = store.message(d["message_id"])
-            versions = store.draft_versions(d["id"])
-            text = (versions[-1]["text"] if versions else "").replace("\n", " ")[:60]
+            try:
+                latest = flow.latest_text(d["id"])  # what `draft approve` approves
+            except ValueError:  # no versions
+                latest = ""
+            text = latest.replace("\n", " ")[:60]
             print(f"{d['id']}  {d['conversation_id']}  {d['status']}  {_day(d['created_at'])}  {msg['subject']}  {text}")
     finally:
         store.close()
+        connector.close()
     return 0
 
 
@@ -450,7 +456,11 @@ def _draft_run(flow: ReplyFlow, store: Store, connector, args: argparse.Namespac
     if row["is_owner"]:
         print(f"message {args.message} is the owner's", file=sys.stderr)
         return 1
-    msg = connector.fetch(SourceRef.from_key(row["ref_key"]))
+    try:
+        msg = connector.fetch(SourceRef.from_key(row["ref_key"]))
+    except KeyError:
+        print(f"message {args.message} is no longer in the mail cache", file=sys.stderr)
+        return 1
     draft_id = flow.on_incoming(row["conversation_id"], msg)
     if draft_id is not None:
         print(f"draft {draft_id}")
@@ -482,7 +492,12 @@ def _draft_cloud(flow: ReplyFlow, store: Store, args: argparse.Namespace) -> int
     if not sys.stdin.isatty():
         print(f"run: chatmaid draft send {p.call_id}  (or: chatmaid draft decline {p.call_id})")
         return 0
-    if input(f"Send this to {p.backend}? [y/N] ").strip().lower() in ("y", "yes"):
+    try:
+        answer = input(f"Send this to {p.backend}? [y/N] ")
+    except (EOFError, KeyboardInterrupt):  # no answer is no consent
+        print()
+        answer = ""
+    if answer.strip().lower() in ("y", "yes"):
         _send_call(flow, store, p.call_id)
     else:
         flow.decline_cloud(p.call_id)

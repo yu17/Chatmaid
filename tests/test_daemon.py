@@ -220,3 +220,70 @@ def test_watcher_merges_conversations_joined_by_a_new_message(watch_env):
     assert watch_env.watcher.handle_trigger("timer") == 1
     assert store.conversation(drop) is None and store.conversation(keep)["message_count"] == 3
     assert watch_env.watcher._handle("timer") == 0
+
+
+def test_stop_requested_between_refs_holds_back_watermark(watch_env):
+    w = watch_env.watcher
+    w.handle_trigger("timer")
+    before = watch_env.store.get_checkpoint("watch", "evolution")
+    watch_env.add_row("INBOX", uid="7", message_id="<n7@x>", date=1_700_000_500, body="one", **ANN)
+    watch_env.add_row("News", uid="8", message_id="<n8@x>", date=1_700_000_501, body="two", **ANN)
+    routed = []
+
+    def stop_after_first(route, cid, msg):
+        routed.append(msg.ref)
+        w.stop_requested.set()
+
+    w.on_routed = stop_after_first
+    assert w._handle("timer") == 1
+    first = routed[0]
+    other = "a1/News" if first.folder == "INBOX" else "a1/INBOX"
+    state = watch_env.store.get_checkpoint("watch", "evolution")
+    assert state[f"a1/{first.folder}"] == int(first.uid)
+    assert state[other] == before[other]  # the unprocessed ref is scanned again
+    w.stop_requested.clear()
+    assert w._handle("timer") == 1
+    assert len(routed) == 2 and routed[1] != first
+    assert w._handle("timer") == 0
+
+
+def test_stop_requested_within_a_folder_rescans_it_without_rerouting(watch_env):
+    w = watch_env.watcher
+    w.handle_trigger("timer")
+    before = watch_env.store.get_checkpoint("watch", "evolution")["a1/INBOX"]
+    watch_env.add_row("INBOX", uid="7", message_id="<n7@x>", date=1_700_000_500, body="one", **ANN)
+    watch_env.add_row("INBOX", uid="8", message_id="<n8@x>", date=1_700_000_501, body="two", **ANN)
+    w.on_routed = lambda *_: w.stop_requested.set()
+    assert w._handle("timer") == 1
+    assert watch_env.store.get_checkpoint("watch", "evolution")["a1/INBOX"] == before
+    w.stop_requested.clear()
+    w.on_routed = None
+    assert w._handle("timer") == 1  # uid 7 is already stored and skipped
+    assert watch_env.store.get_checkpoint("watch", "evolution")["a1/INBOX"] == 8
+
+
+async def test_stop_during_a_scan_sets_stop_requested(watch_env):
+    import threading
+
+    w = watch_env.watcher
+    w.events.interval_s = 1
+    entered, release = threading.Event(), threading.Event()
+    real = w._handle
+
+    def slow(kind):
+        entered.set()
+        release.wait(5)
+        return real(kind)
+
+    w._handle = slow
+    stop = asyncio.Event()
+    task = asyncio.create_task(w.run(stop))
+    await asyncio.to_thread(entered.wait, 5)
+    stop.set()
+    for _ in range(50):
+        if w.stop_requested.is_set():
+            break
+        await asyncio.sleep(0.02)
+    assert w.stop_requested.is_set() and not task.done()
+    release.set()
+    await asyncio.wait_for(task, 5)

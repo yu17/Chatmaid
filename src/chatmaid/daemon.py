@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import sqlite3
+import threading
 from collections.abc import Callable
 
 from chatmaid.connectors.base import Connector
@@ -25,6 +26,9 @@ class Watcher:
         self.connector = connector
         self.events = events
         self.on_routed: Callable[[str, int, NormalizedMessage], None] | None = None
+        # set by `run` when asked to stop mid-scan: `_handle` finishes the message in hand,
+        # keeps the rest for the next start and returns (ruling R18)
+        self.stop_requested = threading.Event()
         self._indexes: dict[str, ThreadIndex] = {}
 
     # -- routing ---------------------------------------------------------
@@ -88,7 +92,13 @@ class Watcher:
         still_pending: dict[str, int] = {}
         held_back: set[str] = set()  # folder keys whose watermark must not pass a deferred ref
         routed = 0
-        for ref in refs:
+        for i, ref in enumerate(refs):
+            if self.stop_requested.is_set():
+                # every folder with refs left over keeps its old watermark; refs already
+                # stored there are skipped by has_ref on the next scan
+                held_back.update(f"{r.account}/{r.folder}" for r in refs[i:])
+                log.info("stop requested: %d messages left for the next scan", len(refs) - i)
+                break
             if self.store.has_ref(ref.key()):
                 continue
             try:
@@ -148,7 +158,11 @@ class Watcher:
                     with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
                         await nxt
                     break
-                await asyncio.to_thread(self.handle_trigger, nxt.result())
+                scan = asyncio.ensure_future(asyncio.to_thread(self.handle_trigger, nxt.result()))
+                await asyncio.wait({scan, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+                if not scan.done():
+                    self.stop_requested.set()  # the scan stops after the message in hand
+                await scan
         finally:
             stop_task.cancel()
             await asyncio.gather(stop_task, return_exceptions=True)
