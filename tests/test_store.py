@@ -9,7 +9,7 @@ from chatmaid.store import Store
 def test_schema_applied(tmp_path):
     s = Store(tmp_path / "i.sqlite", embedding_dim=4)
     try:
-        assert s.counts() == {"identities": 0, "contacts": 0, "conversations": 0, "messages": 0, "memories": 0, "embeddings": 0, "events": 0}
+        assert s.counts() == {"identities": 0, "contacts": 0, "conversations": 0, "messages": 0, "memories": 0, "embeddings": 0, "events": 0, "drafts": 0, "cloud_calls": 0}
     finally:
         s.close()
 

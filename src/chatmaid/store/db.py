@@ -1,4 +1,4 @@
-"""SQLite store (schema v1) with a sqlite-vec embedding index."""
+"""SQLite store (schema v2) with a sqlite-vec embedding index."""
 
 import contextlib
 import json
@@ -20,6 +20,8 @@ _COUNT_TABLES = {
     "memories": "memory",
     "embeddings": "embedding_item",
     "events": "event_log",
+    "drafts": "draft",
+    "cloud_calls": "cloud_call",
 }
 
 
@@ -32,7 +34,7 @@ def _like_escape(text: str) -> str:
 
 
 class Store:
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, path: Path, *, embedding_dim: int):
         self._conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
@@ -386,6 +388,39 @@ class Store:
     def memory(self, memory_id: int) -> sqlite3.Row | None:
         return self._conn.execute("SELECT * FROM memory WHERE id = ?", (memory_id,)).fetchone()
 
+    def message(self, message_id: int) -> sqlite3.Row | None:
+        return self._conn.execute("SELECT * FROM message WHERE id = ?", (message_id,)).fetchone()
+
+    def message_by_ref(self, ref_key: str) -> sqlite3.Row | None:
+        return self._conn.execute("SELECT * FROM message WHERE ref_key = ?", (ref_key,)).fetchone()
+
+    def contact(self, contact_id: int) -> sqlite3.Row | None:
+        return self._conn.execute("SELECT * FROM contact WHERE id = ?", (contact_id,)).fetchone()
+
+    def identities_of(self, contact_id: int) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT * FROM identity WHERE contact_id = ? ORDER BY id", (contact_id,)
+        ).fetchall()
+
+    def set_conversation_tier(
+        self, conversation_id: int, tier: str, *, only_if_unset: bool = True
+    ) -> None:
+        sql = "UPDATE conversation SET tier = ? WHERE id = ?"
+        if only_if_unset:
+            sql += " AND tier IS NULL"
+        self._conn.execute(sql, (tier, conversation_id))
+
+    def memories_for(
+        self, *, contact_id: int | None = None, conversation_id: int | None = None, limit: int = 20
+    ) -> list[sqlite3.Row]:
+        if contact_id is None and conversation_id is None:
+            return []
+        return self._conn.execute(
+            "SELECT * FROM memory WHERE superseded_by IS NULL AND (contact_id = ? OR conversation_id = ?) "
+            "ORDER BY observed_at DESC NULLS LAST, id DESC LIMIT ?",
+            (contact_id, conversation_id, limit),
+        ).fetchall()
+
     def participant_labels(self, conversation_id: int) -> list[str]:
         rows = self._conn.execute(
             "SELECT COALESCE(NULLIF(c.name, ''), (SELECT MIN(address) FROM identity "
@@ -491,6 +526,164 @@ class Store:
 
     def clear_checkpoints(self, task: str) -> int:
         return self._conn.execute("DELETE FROM checkpoint WHERE task = ?", (task,)).rowcount
+
+    # --- triage ---
+
+    def add_triage(
+        self,
+        message_id: int,
+        category: str,
+        reason: str,
+        *,
+        decided_by: str,
+        model: str | None = None,
+    ) -> int:
+        self._conn.execute(
+            "INSERT INTO triage (message_id, category, reason, decided_by, model, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET "
+            "category = excluded.category, reason = excluded.reason, "
+            "decided_by = excluded.decided_by, model = excluded.model, "
+            "created_at = excluded.created_at",
+            (message_id, category, reason, decided_by, model, _now()),
+        )
+        return self._conn.execute(
+            "SELECT id FROM triage WHERE message_id = ?", (message_id,)
+        ).fetchone()["id"]
+
+    def triage_for(self, message_id: int) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT * FROM triage WHERE message_id = ?", (message_id,)
+        ).fetchone()
+
+    # --- drafts ---
+
+    def create_draft(
+        self, conversation_id: int, message_id: int, *, language: str, context: dict
+    ) -> int:
+        now = _now()
+        return self._conn.execute(
+            "INSERT INTO draft (conversation_id, message_id, status, language, context_json, "
+            "created_at, updated_at) VALUES (?, ?, 'pending', ?, ?, ?, ?)",
+            (conversation_id, message_id, language, json.dumps(context, ensure_ascii=False), now, now),
+        ).lastrowid
+
+    def add_draft_version(
+        self,
+        draft_id: int,
+        *,
+        round: int,
+        candidate: int,
+        origin: str,
+        text: str,
+        rationale: str | None,
+        comment: str | None = None,
+        cloud_call_id: int | None = None,
+    ) -> int:
+        return self._conn.execute(
+            "INSERT INTO draft_version (draft_id, round, candidate, origin, text, rationale, "
+            "comment, cloud_call_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (draft_id, round, candidate, origin, text, rationale, comment, cloud_call_id, _now()),
+        ).lastrowid
+
+    def draft(self, draft_id: int) -> sqlite3.Row | None:
+        return self._conn.execute("SELECT * FROM draft WHERE id = ?", (draft_id,)).fetchone()
+
+    def draft_versions(self, draft_id: int) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT * FROM draft_version WHERE draft_id = ? ORDER BY round, candidate, id",
+            (draft_id,),
+        ).fetchall()
+
+    def next_round(self, draft_id: int) -> int:
+        row = self._conn.execute(
+            "SELECT MAX(round) AS r FROM draft_version WHERE draft_id = ?", (draft_id,)
+        ).fetchone()
+        return 1 if row["r"] is None else row["r"] + 1
+
+    def drafts(self, *, status: str | None = "pending", limit: int = 50) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM draft"
+        params: list = []
+        if status is not None:
+            sql += " WHERE status = ?"
+            params.append(status)
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        return self._conn.execute(sql, params).fetchall()
+
+    def pending_draft_for(self, conversation_id: int) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT * FROM draft WHERE conversation_id = ? AND status = 'pending' "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (conversation_id,),
+        ).fetchone()
+
+    def set_draft_status(
+        self,
+        draft_id: int,
+        status: str,
+        *,
+        final_text: str | None = None,
+        outcome_ref: str | None = None,
+        outcome_preview: str | None = None,
+    ) -> None:
+        self._conn.execute(
+            "UPDATE draft SET status = ?, final_text = COALESCE(?, final_text), "
+            "outcome_ref = COALESCE(?, outcome_ref), "
+            "outcome_preview = COALESCE(?, outcome_preview), updated_at = ? WHERE id = ?",
+            (status, final_text, outcome_ref, outcome_preview, _now(), draft_id),
+        )
+
+    # --- cloud calls ---
+
+    def add_cloud_call(
+        self,
+        *,
+        draft_id: int | None,
+        backend: str,
+        model: str | None,
+        payload: str,
+        mapping: dict[str, str],
+        comment: str | None,
+    ) -> int:
+        return self._conn.execute(
+            "INSERT INTO cloud_call (draft_id, backend, model, status, payload, mapping_json, "
+            "comment, created_at) VALUES (?, ?, ?, 'proposed', ?, ?, ?, ?)",
+            (
+                draft_id,
+                backend,
+                model,
+                payload,
+                json.dumps(mapping, ensure_ascii=False),
+                comment,
+                _now(),
+            ),
+        ).lastrowid
+
+    def cloud_call(self, call_id: int) -> sqlite3.Row | None:
+        return self._conn.execute("SELECT * FROM cloud_call WHERE id = ?", (call_id,)).fetchone()
+
+    def cloud_calls(self, *, limit: int = 50) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT * FROM cloud_call ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)
+        ).fetchall()
+
+    def set_cloud_call_status(
+        self,
+        call_id: int,
+        status: str,
+        *,
+        consented_at: int | None = None,
+        response: str | None = None,
+        response_hash: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        finished = _now() if status in ("sent", "failed", "declined") else None
+        self._conn.execute(
+            "UPDATE cloud_call SET status = ?, consented_at = COALESCE(?, consented_at), "
+            "response = COALESCE(?, response), response_hash = COALESCE(?, response_hash), "
+            "error = COALESCE(?, error), finished_at = COALESCE(?, finished_at) WHERE id = ?",
+            (status, consented_at, response, response_hash, error, finished, call_id),
+        )
 
     # --- embeddings ---
 
