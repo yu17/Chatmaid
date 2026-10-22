@@ -84,3 +84,21 @@ def test_render_sections_order_and_roundtrip(env):
 
 def replace_style(ctx):
     return replace(ctx, style=None)
+
+
+def test_recent_excludes_the_incoming_message(env, sample_message):
+    e, _, row = env
+    incoming = replace(
+        sample_message,
+        ref=SourceRef("evolution", "a1", "INBOX", "777"),
+        message_id="<in@x>",
+        sent_at=1_700_000_200,
+        text="incoming question",
+        preview="INCOMING-777",
+    )
+    e.store.upsert_message(row["conversation_id"], incoming, row["sender_identity_id"])
+    assert any(r["ref_key"] == incoming.ref.key() for r in e.store.messages_for(row["conversation_id"]))
+    ctx = build(e, incoming, row)
+    texts = [t for _, _, t in ctx.recent]
+    assert "INCOMING-777" not in texts
+    assert any("thanks, see you tomorrow" in t for t in texts)
