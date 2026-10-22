@@ -137,7 +137,7 @@ def test_since_checkpoint_covers_rows_the_filter_excluded(fake_env, store):
     assert store.get_checkpoint("ingest", "a1/INBOX")["last_uid"] == 3
     assert not store.has_message_id("email", "a1", "<old3@x>")
     watcher = Watcher(store, fake_env.connector, EventSource([fake_env.db_path], enable_dbus=False))
-    assert watcher.handle_trigger("timer") == 0 and store.events() == []
+    assert watcher._handle("timer") == 0 and store.events() == []
 
 
 def test_ingest_batch_failure_rolls_back_and_retries_the_folder(fake_env, store, monkeypatch):
@@ -187,5 +187,5 @@ def test_ingest_watermark_covers_duplicate_rows_so_watch_routes_nothing(fake_env
     _pipeline(fake_env, store).ingest(InitOptions(since=1_650_000_000))
     assert store.get_checkpoint("ingest", "a1/[Gmail]/All Mail")["last_uid"] == 9
     watcher = Watcher(store, fake_env.connector, EventSource([fake_env.db_path], enable_dbus=False))
-    assert watcher.handle_trigger("timer") == 0
+    assert watcher._handle("timer") == 0
     assert store.events() == []
