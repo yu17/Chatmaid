@@ -8,13 +8,27 @@ from chatmaid.model import SourceRef
 from chatmaid.store import Store
 
 
-@pytest.fixture
-def cli_draft_env(fake_env):
+def _ingest(fake_env):
     store = Store(fake_env.config.index_path, embedding_dim=4)
     InitPipeline(store, fake_env.connector, FakeLLM(dim=4), fake_env.config).ingest(InitOptions())
     fake_env.row_id = store.message_by_ref(SourceRef("evolution", "a1", "INBOX", "1").key())["id"]
     store.close()
     return fake_env
+
+
+@pytest.fixture
+def old_mail_env(fake_env):
+    return _ingest(fake_env)  # INBOX/1 is from 2020: past the default 14-day draft window
+
+
+@pytest.fixture
+def cli_draft_env(fake_env):
+    text = fake_env.config_path.read_text(encoding="utf-8")
+    assert "max_age_days = 14 " in text
+    fake_env.config_path.write_text(
+        text.replace("max_age_days = 14 ", "max_age_days = 100000 "), encoding="utf-8"
+    )
+    return _ingest(fake_env)
 
 
 def run(env, *argv):
@@ -32,6 +46,11 @@ def test_cli_draft_run_and_list(cli_draft_env, capsys):
     out = capsys.readouterr().out.splitlines()
     assert out[0].split()[:3] == ["id", "conv", "status"]
     assert "pending" in out[1] and "test" in out[1]
+
+
+def test_cli_draft_run_applies_the_age_rule(old_mail_env, capsys):
+    assert run(old_mail_env, "draft", "run", "--message", str(old_mail_env.row_id), "--fake-llm") == 0
+    assert capsys.readouterr().out == "no draft: informational (older than 14 days)\n"
 
 
 def test_cli_draft_run_unknown_message(cli_draft_env, capsys):

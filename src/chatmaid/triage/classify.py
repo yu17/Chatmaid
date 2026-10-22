@@ -21,10 +21,18 @@ class Triage:
     model: str | None = None
 
 
-def rule_triage(msg: NormalizedMessage, conversation: sqlite3.Row | None) -> Triage | None:
-    """Decide the obvious cases from headers and labels; None means ask the model."""
+def rule_triage(
+    msg: NormalizedMessage, conversation: sqlite3.Row | None, *, now: int, max_age_days: int
+) -> Triage | None:
+    """Decide the obvious cases from age, headers and labels; None means ask the model.
+
+    Mail sent more than `max_age_days` before `now` is informational (ruling R17): a reply
+    that late is the owner's call, not a draft the watcher should write.
+    """
     if msg.body_missing:
         return Triage("unknown", None, "body not cached", "rule")
+    if msg.sent_at < now - max_age_days * 86400:
+        return Triage("informational", None, f"older than {max_age_days} days", "rule")
     if msg.bulk:
         return Triage("bulk", "bulk", "bulk mail headers", "rule")
     if "spam" in msg.labels:
@@ -60,9 +68,11 @@ def triage_message(
     conversation: sqlite3.Row | None,
     *,
     message_chars: int,
+    now: int,
+    max_age_days: int,
 ) -> Triage:
     """The rule verdict if there is one, otherwise the model's."""
-    verdict = rule_triage(msg, conversation)
+    verdict = rule_triage(msg, conversation, now=now, max_age_days=max_age_days)
     if verdict is not None:
         return verdict
     try:

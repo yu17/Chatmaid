@@ -103,7 +103,8 @@ class ReplyFlow:
             return None
         t = triage_message(
             self.llm, cfg.lmstudio.model_small, msg, store.conversation(conversation_id),
-            message_chars=cfg.draft.message_chars,
+            message_chars=cfg.draft.message_chars, now=self.now(),
+            max_age_days=cfg.draft.max_age_days,
         )
         store.add_triage(row["id"], t.category, t.reason, decided_by=t.decided_by, model=t.model)
         if t.tier:

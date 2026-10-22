@@ -37,6 +37,7 @@ candidates = 2             # 1..3 candidate replies per draft
 recent_messages = 12       # hot-window messages in the context header
 memories = 8               # memories per source (direct + vector) in the header
 message_chars = 6000       # characters of the incoming message shown to the model
+max_age_days = 14          # older incoming mail is triaged informational by rule, never drafted
 
 [cloud]
 default_backend = "codex"  # "codex" or "claude"; every call still needs explicit consent

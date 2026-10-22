@@ -51,6 +51,7 @@ class DraftConfig:
     recent_messages: int
     memories: int
     message_chars: int
+    max_age_days: int
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,7 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
         "recent_messages": 12,
         "memories": 8,
         "message_chars": 6000,
+        "max_age_days": 14,
     },
     "cloud": {
         "default_backend": "codex",
@@ -189,6 +191,7 @@ def load(path: Path, *, project_root: Path | None = None) -> Config:
             recent_messages=dr["recent_messages"],
             memories=dr["memories"],
             message_chars=dr["message_chars"],
+            max_age_days=dr["max_age_days"],
         ),
         cloud=CloudConfig(
             default_backend=cl["default_backend"],

@@ -61,6 +61,18 @@ def test_body_missing_incoming_makes_no_draft(flow_env):
     assert calls(env, "triage") == []
 
 
+def test_old_incoming_is_not_drafted(flow_env):
+    env = flow_env
+    env.flow.now = lambda: 1_700_000_500 + 30 * 86400
+    row = env.arrive("100", date=1_700_000_500)
+    t = env.store.triage_for(row["id"])
+    assert (t["category"], t["decided_by"], t["reason"]) == (
+        "informational", "rule", "older than 14 days"
+    )
+    assert calls(env, "triage") == [] and calls(env, "reply_draft") == []
+    assert env.store.drafts(status=None) == []
+
+
 def test_informational_makes_no_draft(flow_env):
     env = flow_env
     env.llm.responses["triage"] = '{"category":"informational","tier":"work","reason":"fyi"}'

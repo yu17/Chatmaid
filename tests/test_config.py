@@ -50,6 +50,7 @@ def test_draft_and_cloud_defaults(tmp_path):
     assert cfg.draft.recent_messages == 12
     assert cfg.draft.memories == 8
     assert cfg.draft.message_chars == 6000
+    assert cfg.draft.max_age_days == 14
     assert cfg.cloud.default_backend == "codex"
     assert cfg.cloud.codex_model == "gpt-6-astra"
     assert cfg.cloud.claude_model == ""
