@@ -26,7 +26,7 @@ def test_handle_trigger_routes_and_logs(watch_env):
 
 
 def test_handle_trigger_time_mode_folder(watch_env):
-    watch_env.add_folder("Exchange Inbox", time_mode=True)
+    watch_env.add_folder("Exchange Inbox")
     watch_env.watcher.handle_trigger("timer")
     watch_env.add_row("Exchange Inbox", uid="AQMkADMy1", message_id="<e1@x>", sender="bob@x.org", to="me@x.org", date=1_700_000_700, dreceived=1_700_000_700, body="hi")
     assert watch_env.watcher.handle_trigger("timer") == 1
@@ -78,4 +78,88 @@ def test_folder_without_ingest_checkpoint_is_baselined(watch_env):
     watch_env.add_row("Archive", uid="1", message_id="<old1@x>", date=1_600_000_001, body="old backlog", **ANN)
     assert watch_env.watcher.handle_trigger("timer") == 0 and watch_env.store.events() == []
     watch_env.add_row("Archive", uid="2", message_id="<new2@x>", date=1_700_000_800, body="fresh", **ANN)
+    assert watch_env.watcher.handle_trigger("timer") == 1
+
+
+def _body_path(env, folder, uid):
+    return env.db_path.parent / "folders" / folder.replace("/", "/subfolders/") / "cur" / "00" / uid
+
+
+def _add_bodyless(env, uid):
+    env.add_row("INBOX", uid=uid, message_id=f"<n{uid}@x>", date=1_700_000_500, body="late body", **ANN)
+    path = _body_path(env, "INBOX", uid)
+    text = path.read_text(encoding="utf-8")
+    path.unlink()
+    return path, text
+
+
+def test_row_without_body_is_deferred_until_body_arrives(watch_env):
+    watch_env.watcher.handle_trigger("timer")
+    path, text = _add_bodyless(watch_env, "7")
+    watch_env.add_row("INBOX", uid="8", message_id="<n8@x>", date=1_700_000_501, body="later row", **ANN)
+    key = "a1/INBOX"
+    before = watch_env.store.get_checkpoint("watch", "evolution")[key]
+    assert watch_env.watcher.handle_trigger("timer") == 1  # uid 8 is routed, uid 7 waits
+    assert watch_env.watcher.handle_trigger("timer") == 0
+    state = watch_env.store.get_checkpoint("watch", "evolution")
+    assert state[key] == before and list(state["_pending"].values()) == [2]
+    path.write_text(text, encoding="utf-8")
+    assert watch_env.watcher.handle_trigger("timer") == 1
+    state = watch_env.store.get_checkpoint("watch", "evolution")
+    assert state[key] == 8 and "_pending" not in state
+
+
+def test_row_that_never_gets_a_body_is_routed_on_fourth_trigger(watch_env):
+    watch_env.watcher.handle_trigger("timer")
+    _add_bodyless(watch_env, "7")
+    assert [watch_env.watcher.handle_trigger("timer") for _ in range(4)] == [0, 0, 0, 1]
+    assert "_pending" not in watch_env.store.get_checkpoint("watch", "evolution")
+
+
+def test_folder_appearing_later_is_baselined_not_routed(watch_env):
+    watch_env.watcher.handle_trigger("timer")
+    watch_env.add_folder("Later")
+    watch_env.add_row("Later", uid="1", message_id="<l1@x>", date=1_700_000_501, body="one", **ANN)
+    watch_env.add_row("Later", uid="2", message_id="<l2@x>", date=1_700_000_502, body="two", **ANN)
+    assert watch_env.watcher.handle_trigger("timer") == 0
+    assert watch_env.store.get_checkpoint("watch", "evolution")["a1/Later"] == 2
+    watch_env.add_row("Later", uid="3", message_id="<l3@x>", date=1_700_000_503, body="three", **ANN)
+    assert watch_env.watcher.handle_trigger("timer") == 1
+
+
+def test_poison_message_is_logged_and_others_still_routed(watch_env, monkeypatch):
+    import chatmaid.daemon as daemon
+
+    real = daemon.store_message
+
+    def flaky(store, index, connector, msg):
+        if msg.message_id == "<n7@x>":
+            raise RuntimeError("boom")
+        return real(store, index, connector, msg)
+
+    monkeypatch.setattr(daemon, "store_message", flaky)
+    watch_env.watcher.handle_trigger("timer")
+    watch_env.add_row("INBOX", uid="7", message_id="<n7@x>", date=1_700_000_500, body="poison", **ANN)
+    watch_env.add_row("INBOX", uid="8", message_id="<n8@x>", date=1_700_000_501, body="fine", **ANN)
+    assert watch_env.watcher.handle_trigger("timer") == 1
+    kinds = sorted(e["kind"] for e in watch_env.store.events())
+    assert kinds == ["error", "incoming"]
+    assert watch_env.store.get_checkpoint("watch", "evolution")["a1/INBOX"] == 8
+    assert watch_env.watcher.handle_trigger("timer") == 0
+
+
+def test_log_event_failure_rolls_back_message_and_keeps_state(watch_env, monkeypatch):
+    watch_env.watcher.handle_trigger("timer")
+    before = watch_env.store.get_checkpoint("watch", "evolution")
+    watch_env.add_row("INBOX", uid="7", message_id="<n7@x>", date=1_700_000_500, body="new", **ANN)
+    real = watch_env.store.log_event
+
+    def locked(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(watch_env.store, "log_event", locked)
+    assert watch_env.watcher.handle_trigger("timer") == 0
+    assert not watch_env.store.has_message_id("email", "a1", "<n7@x>")
+    assert watch_env.store.get_checkpoint("watch", "evolution") == before
+    monkeypatch.setattr(watch_env.store, "log_event", real)
     assert watch_env.watcher.handle_trigger("timer") == 1

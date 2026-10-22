@@ -208,7 +208,14 @@ class EvolutionConnector:
         row = cache.row(folder, ref.uid)
         return None if row is None else row.dreceived
 
-    def scan_new(self, state: dict[str, int]) -> tuple[list[SourceRef], dict[str, int]]:
+    def scan_new(
+        self, state: dict[str, int], *, baseline_missing: bool = False
+    ) -> tuple[list[SourceRef], dict[str, int]]:
+        """Refs past each folder's watermark.
+
+        With `baseline_missing`, a folder absent from `state` is read only to record its watermark
+        (0 when empty) and returns no refs: its existing content is not "new".
+        """
         new_state = dict(state)
         refs: list[SourceRef] = []
         for account in self._accounts:
@@ -220,6 +227,9 @@ class EvolutionConnector:
                     top = cache.watermark(folder, rows)
                 except sqlite3.OperationalError as e:
                     log.warning("skipping %s: %s", key, e)
+                    continue
+                if baseline_missing and key not in state:
+                    new_state[key] = top if top is not None else 0
                     continue
                 refs.extend(SourceRef("evolution", account.uid, folder.name, r.uid) for r in rows)
                 if top is not None:

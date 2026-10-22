@@ -294,7 +294,7 @@ def watch_env(ingested_env):
     def _connect():
         return sqlite3.connect(env.db_path)
 
-    def add_folder(name, *, time_mode=False):  # mode is detected from the first row's uid
+    def add_folder(name):  # uid mode (int or opaque) is detected from the first row added
         conn = _connect()
         try:
             fid = conn.execute("SELECT MAX(folder_id) FROM folders").fetchone()[0] + 1

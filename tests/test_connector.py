@@ -108,3 +108,8 @@ def test_scan_new_time_mode_folder(fake_env):
     assert state2["a1/Exch"] == 1_700_000_700
     refs3, state3 = fake_env.connector.scan_new(state2)
     assert [r.uid for r in refs3] == ["AQ3"] and state3 == state2
+
+
+def test_scan_new_baseline_missing_records_watermark_without_refs(fake_env):
+    refs, state = fake_env.connector.scan_new({}, baseline_missing=True)
+    assert refs == [] and state == fake_env.connector.scan_new({})[1]

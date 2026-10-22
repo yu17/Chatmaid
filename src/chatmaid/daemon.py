@@ -15,6 +15,9 @@ from chatmaid.threads import ThreadIndex
 
 log = logging.getLogger(__name__)
 
+PENDING = "_pending"
+MAX_BODY_WAITS = 3  # triggers a body-less message is held back before it is routed as is
+
 
 class Watcher:
     def __init__(self, store: Store, connector: Connector, events: EventSource):
@@ -46,15 +49,14 @@ class Watcher:
         return cid
 
     # -- scanning --------------------------------------------------------
-    def _state(self) -> dict[str, int]:
+    def _load_state(self) -> tuple[dict[str, int], dict[str, int]]:
+        """(folder watermarks, pending ref attempts); seeded from ingest when no watch state exists."""
         saved = self.store.get_checkpoint("watch", self.connector.name)
-        if saved is not None:
-            return {k: int(v) for k, v in saved.items()}
-        # First run. Folders ingest never checkpointed hold a backlog that is not "new mail":
-        # baseline them at their current watermark, and let ingest checkpoints win elsewhere.
-        _, baseline = self.connector.scan_new({})
-        seeded = {k: int(v["last_uid"]) for k, v in self.store.checkpoints("ingest").items()}
-        return {**baseline, **seeded}
+        if saved is None:
+            ingest = self.store.checkpoints("ingest")
+            return {k: int(v["last_uid"]) for k, v in ingest.items()}, {}
+        pending = {k: int(v) for k, v in saved.get(PENDING, {}).items()}
+        return {k: int(v) for k, v in saved.items() if k != PENDING}, pending
 
     def _already_stored(self, msg: NormalizedMessage) -> bool:
         return bool(msg.message_id) and self.store.has_message_id(
@@ -62,12 +64,21 @@ class Watcher:
         )
 
     def handle_trigger(self, kind: str) -> int:
-        """Scan for new messages and route them; returns how many were routed."""
+        """Scan for new messages and route them; returns how many were routed.
+
+        A locked or failing database aborts the trigger with the saved state untouched.
+        """
         try:
-            refs, new_state = self.connector.scan_new(self._state())
+            return self._handle(kind)
         except sqlite3.OperationalError as e:
-            log.warning("scan skipped (%s trigger): %s", kind, e)
+            log.warning("trigger %r skipped: %s", kind, e)
             return 0
+
+    def _handle(self, kind: str) -> int:
+        state, pending = self._load_state()
+        refs, new_state = self.connector.scan_new(state, baseline_missing=True)
+        still_pending: dict[str, int] = {}
+        held_back: set[str] = set()  # folder keys whose watermark must not pass a deferred ref
         routed = 0
         for ref in refs:
             if self.store.has_ref(ref.key()):
@@ -77,19 +88,41 @@ class Watcher:
             except KeyError:
                 log.warning("message %s vanished before it could be read", ref.key())
                 continue
-            except sqlite3.OperationalError as e:
-                # Keep the old state: unread refs are rescanned, stored ones skipped by has_ref.
-                log.warning("scan interrupted at %s: %s", ref.key(), e)
-                return routed
-            if self._already_stored(msg):
+            except sqlite3.OperationalError:
+                raise
+            except Exception as e:
+                self._poison(ref, e)
                 continue
-            route = self.route(msg)
-            cid = self.on_owner_message(msg) if route == "owner" else self.on_incoming(msg)
+            attempts = pending.get(ref.key(), 0)
+            if msg.body_missing and attempts < MAX_BODY_WAITS:
+                still_pending[ref.key()] = attempts + 1  # body file is written after the row
+                held_back.add(f"{ref.account}/{ref.folder}")
+                continue
+            try:
+                if self._already_stored(msg):
+                    continue
+                route = self.route(msg)
+                with self.store.transaction():
+                    cid = self.on_owner_message(msg) if route == "owner" else self.on_incoming(msg)
+            except sqlite3.OperationalError:
+                raise
+            except Exception as e:
+                self._poison(ref, e)
+                continue
             routed += 1
             if self.on_routed is not None:
                 self.on_routed(route, cid, msg)
-        self.store.set_checkpoint("watch", self.connector.name, new_state)
+        for key in held_back:
+            new_state[key] = state[key]
+        saved: dict = dict(new_state)
+        if still_pending:
+            saved[PENDING] = still_pending
+        self.store.set_checkpoint("watch", self.connector.name, saved)
         return routed
+
+    def _poison(self, ref, error: Exception) -> None:
+        log.error("failed to handle %s: %r", ref.key(), error)
+        self.store.log_event("evolution", "error", ref.key(), {"error": repr(error)})
 
     # -- loop ------------------------------------------------------------
     async def run(self, stop: asyncio.Event) -> None:

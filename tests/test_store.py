@@ -1,5 +1,7 @@
 import dataclasses
 
+import pytest
+
 from chatmaid.model import make_preview
 from chatmaid.store import Store
 
@@ -194,3 +196,13 @@ def test_search_messages_escapes_like_wildcards(store, sample_message):
     _add(store, cid, sid, sample_message, "4", "fooxbar", 1003)
     assert [r["subject"] for r in store.search_messages(text="50% off")] == ["50% off"]
     assert [r["subject"] for r in store.search_messages(text="foo_bar")] == ["foo_bar"]
+
+
+def test_transaction_commits_and_rolls_back(store):
+    with store.transaction():
+        store.log_event("t", "ok", "r1", {})
+    with pytest.raises(RuntimeError):
+        with store.transaction():
+            store.log_event("t", "lost", "r2", {})
+            raise RuntimeError("x")
+    assert [e["kind"] for e in store.events()] == ["ok"]

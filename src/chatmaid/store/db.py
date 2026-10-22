@@ -1,8 +1,10 @@
 """SQLite store (schema v1) with a sqlite-vec embedding index."""
 
+import contextlib
 import json
 import sqlite3
 import time
+from collections.abc import Iterator
 from importlib import resources
 from pathlib import Path
 
@@ -248,6 +250,17 @@ class Store:
             ).fetchone()
             is not None
         )
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[None]:
+        """All-or-nothing group of writes on the autocommit connection."""
+        self._conn.execute("BEGIN")
+        try:
+            yield
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        self._conn.execute("COMMIT")
 
     def has_ref(self, ref_key: str) -> bool:
         return (
