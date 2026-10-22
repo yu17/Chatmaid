@@ -273,3 +273,71 @@ def digested_env(ingested_env):
     p.digest(InitOptions())
     p.embed(InitOptions())
     return ingested_env
+
+
+@pytest.fixture
+def watch_env(ingested_env):
+    from chatmaid.connectors.evolution.events import EventSource
+    from chatmaid.daemon import Watcher
+
+    env = ingested_env
+
+    def message(sender="me@x.org", to="me2@x.org", folder="INBOX"):
+        s = Address("", sender)
+        return NormalizedMessage(
+            ref=SourceRef("evolution", "a1", folder, "100"), message_id="<w100@x>", in_reply_to=None,
+            references=(), sender=s, recipients=(Address("", to),), sent_at=1_700_000_000,
+            subject="w", text="w", preview="w", has_attachments=False, attachments=(), size=1,
+            is_owner=env.owner.matches(s), bulk=False, labels=(),
+        )
+
+    def _connect():
+        return sqlite3.connect(env.db_path)
+
+    def add_folder(name, *, time_mode=False):  # mode is detected from the first row's uid
+        conn = _connect()
+        try:
+            fid = conn.execute("SELECT MAX(folder_id) FROM folders").fetchone()[0] + 1
+            conn.execute(
+                "INSERT INTO folders (folder_name, version, flags, nextuid, time, saved_count,"
+                " unread_count, deleted_count, junk_count, visible_count, jnd_count, bdata, folder_id)"
+                " VALUES (?, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, '', ?)",
+                (name, fid),
+            )
+            conn.execute(
+                f"CREATE TABLE messages_{fid} (uid TEXT, flags INTEGER, msg_type INTEGER,"
+                " dirty INTEGER, size INTEGER, dsent NUMERIC, dreceived NUMERIC, subject TEXT,"
+                " mail_from TEXT, mail_to TEXT, mail_cc TEXT, mlist TEXT, part TEXT, labels TEXT,"
+                " usertags TEXT, cinfo TEXT, bdata TEXT, userheaders TEXT, preview TEXT,"
+                " PRIMARY KEY (uid))"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def add_row(folder, *, uid, message_id, sender, to, date, body, dreceived=None, in_reply_to=None):
+        extra = f"In-Reply-To: {in_reply_to}\n" if in_reply_to else ""
+        conn = _connect()
+        try:
+            fid = conn.execute("SELECT folder_id FROM folders WHERE folder_name = ?", (folder,)).fetchone()[0]
+            conn.execute(
+                f"INSERT INTO messages_{fid} (uid, flags, msg_type, dirty, size, dsent, dreceived,"
+                " subject, mail_from, mail_to, mail_cc) VALUES (?, 0, 0, 0, 0, ?, ?, ?, ?, ?, '')",
+                (uid, date, dreceived or date, body[:30], sender, to),
+            )
+            conn.execute(
+                f"UPDATE folders SET saved_count = (SELECT COUNT(*) FROM messages_{fid})"
+                " WHERE folder_id = ?",
+                (fid,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        body_dir = env.db_path.parent / "folders" / folder.replace("/", "/subfolders/") / "cur" / "00"
+        body_dir.mkdir(parents=True, exist_ok=True)
+        (body_dir / uid).write_text(_mail(message_id, sender, to, date, body, extra), encoding="utf-8")
+
+    watcher = Watcher(env.store, env.connector, EventSource([env.db_path], enable_dbus=False))
+    return SimpleNamespace(
+        **vars(env), watcher=watcher, message=message, add_row=add_row, add_folder=add_folder
+    )

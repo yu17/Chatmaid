@@ -1,6 +1,9 @@
 """Command-line entry point. Later tasks add commands via register_<name>(subparsers)."""
 
 import argparse
+import asyncio
+import logging
+import signal
 import sqlite3
 import sys
 
@@ -13,7 +16,9 @@ from chatmaid.config import load as load_config
 from chatmaid.llm.base import LLMError
 from chatmaid.llm.lmstudio import LMStudioClient
 from chatmaid.connectors.evolution.connector import EvolutionConnector
+from chatmaid.connectors.evolution.events import EventSource
 from chatmaid.connectors.evolution.sources import load_accounts
+from chatmaid.daemon import Watcher
 from chatmaid.identity import OwnerIdentity
 from chatmaid.init.pipeline import InitOptions, InitPipeline
 from chatmaid.llm.fake import FakeLLM
@@ -254,6 +259,50 @@ def register_lookup(subparsers) -> None:
     p.set_defaults(handler=_lookup_command)
 
 
+async def _watch(watcher: Watcher) -> None:
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+    try:
+        await watcher.run(stop)
+    finally:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.remove_signal_handler(sig)
+
+
+def _watch_command(args: argparse.Namespace) -> int:
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    cfg = load_config(Path(args.config))
+    accounts = load_accounts(cfg.email.evolution_config_dir, cfg.email.accounts)
+    owner = OwnerIdentity.from_accounts(accounts, cfg.owner.extra_addresses, cfg.owner.aliases)
+    connector = EvolutionConnector(cfg.email, accounts, owner)
+    store = _open_store(cfg)
+    try:
+        db_paths = [cfg.email.evolution_cache_dir / a.uid / "folders.db" for a in accounts]
+        events = EventSource(db_paths, interval_s=args.interval, enable_dbus=not args.no_dbus)
+        watcher = Watcher(store, connector, events)
+
+        def show(kind: str, cid: int, msg) -> None:
+            print(f"{kind}  {cid}  {msg.sender.email}  {msg.subject}", flush=True)
+
+        watcher.on_routed = show
+        dbus = "off" if args.no_dbus else "on"
+        print(f"watching {len(accounts)} accounts (interval {args.interval}s, dbus {dbus})", flush=True)
+        asyncio.run(_watch(watcher))
+    finally:
+        store.close()
+        connector.close()
+    return 0
+
+
+def register_watch(subparsers) -> None:
+    p = subparsers.add_parser("watch", help="route newly arrived mail until interrupted")
+    p.add_argument("--interval", type=int, default=60, help="seconds between timer scans")
+    p.add_argument("--no-dbus", action="store_true", help="do not subscribe to Evolution's D-Bus signal")
+    p.set_defaults(handler=_watch_command)
+
+
 def build_parser() -> tuple[argparse.ArgumentParser, argparse._SubParsersAction]:
     parser = argparse.ArgumentParser(prog="chatmaid")
     parser.add_argument("--version", action="store_true", help="print version and exit")
@@ -267,6 +316,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, argparse._SubParsersAction]
     register_conversations(subparsers)
     register_show(subparsers)
     register_lookup(subparsers)
+    register_watch(subparsers)
     return parser, subparsers
 
 

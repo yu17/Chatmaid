@@ -31,6 +31,7 @@ def test_upsert_message_unique_on_ref_and_never_stores_text(store, sample_messag
     row = store.messages_for(cid)[0]
     assert row["preview"] == make_preview(sample_message.text) and "text" not in row.keys()
     assert store.has_message_id("email", sample_message.ref.account, sample_message.message_id)
+    assert store.has_ref(sample_message.ref.key()) and not store.has_ref("evolution:nope")
 
 
 def test_conversation_counts_and_last_message(store, sample_message):

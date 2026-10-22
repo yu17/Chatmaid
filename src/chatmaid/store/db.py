@@ -31,7 +31,7 @@ def _like_escape(text: str) -> str:
 
 class Store:
     def __init__(self, path: Path, *, embedding_dim: int):
-        self._conn = sqlite3.connect(path, isolation_level=None)
+        self._conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
@@ -246,6 +246,12 @@ class Store:
                 "SELECT 1 FROM message WHERE platform = ? AND account = ? AND message_id = ?",
                 (platform, account, message_id),
             ).fetchone()
+            is not None
+        )
+
+    def has_ref(self, ref_key: str) -> bool:
+        return (
+            self._conn.execute("SELECT 1 FROM message WHERE ref_key = ?", (ref_key,)).fetchone()
             is not None
         )
 

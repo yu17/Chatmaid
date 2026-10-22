@@ -58,6 +58,26 @@ def conversation_key(index: ThreadIndex, msg: NormalizedMessage) -> str:
     return f"email:{msg.ref.account}:{index.key_for(msg.message_id, _refs(msg), fallback)}"
 
 
+def store_message(store: Store, index: ThreadIndex, connector: Connector, msg: NormalizedMessage) -> int:
+    """Upsert identities, the conversation, participants and the message; return the conversation id."""
+    owner = getattr(connector, "owner", None)
+
+    def identity(addr, fallback: bool) -> int:
+        is_owner = owner.matches(addr) if owner is not None else fallback
+        return store.upsert_identity("email", addr.email, addr.name or None, is_owner=is_owner)
+
+    index.add(msg.message_id, _refs(msg))
+    sender_id = identity(msg.sender, msg.is_owner)
+    contact_ids = {store.contact_id_of(sender_id)}
+    contact_ids.update(store.contact_id_of(identity(a, False)) for a in msg.recipients)
+    title = normalize_subject(msg.subject) or msg.subject or "(no subject)"
+    cid = store.upsert_conversation("email", conversation_key(index, msg), title, "thread")
+    for contact_id in contact_ids:
+        store.add_participant(cid, contact_id)
+    store.upsert_message(cid, msg, sender_id)
+    return cid
+
+
 @dataclass(frozen=True)
 class DigestStats:
     conversations: int
@@ -195,7 +215,7 @@ class InitPipeline:
                 if account not in indexes:
                     indexes[account] = build_thread_index(store, "email", account)
                 try:
-                    touched.add(self._store_message(indexes[account], msg))
+                    touched.add(store_message(store, indexes[account], self.connector, msg))
                 except (sqlite3.OperationalError, LLMError) as e:
                     log.warning("ingest failed for %s: %s", msg.ref.key(), e)
                     failed.add(folder)
@@ -228,25 +248,6 @@ class InitPipeline:
             # "last_uid" holds the folder watermark: max int uid, or max dreceived for opaque uids.
             state = {"last_uid": top[folder], "since": since}
             self.store.set_checkpoint("ingest", folder, state)
-
-    def _store_message(self, index: ThreadIndex, msg: NormalizedMessage) -> int:
-        store = self.store
-        owner = getattr(self.connector, "owner", None)
-
-        def identity(addr, fallback: bool) -> int:
-            is_owner = owner.matches(addr) if owner is not None else fallback
-            return store.upsert_identity("email", addr.email, addr.name or None, is_owner=is_owner)
-
-        index.add(msg.message_id, _refs(msg))
-        sender_id = identity(msg.sender, msg.is_owner)
-        contact_ids = {store.contact_id_of(sender_id)}
-        contact_ids.update(store.contact_id_of(identity(a, False)) for a in msg.recipients)
-        title = normalize_subject(msg.subject) or msg.subject or "(no subject)"
-        cid = store.upsert_conversation("email", conversation_key(index, msg), title, "thread")
-        for contact_id in contact_ids:
-            store.add_participant(cid, contact_id)
-        store.upsert_message(cid, msg, sender_id)
-        return cid
 
     # -- pass 2: digest -------------------------------------------------
     def digest(self, opts: InitOptions) -> DigestStats:

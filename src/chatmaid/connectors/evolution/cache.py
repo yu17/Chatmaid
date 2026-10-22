@@ -59,7 +59,8 @@ class EvolutionCache:
         # Evolution uses a rollback journal and short busy budget: read-only, no long transactions.
         if self._connection is None:
             conn = sqlite3.connect(
-                f"file:{self.db_path}?mode=ro", uri=True, timeout=2.0, isolation_level=None
+                f"file:{self.db_path}?mode=ro", uri=True, timeout=2.0, isolation_level=None,
+                check_same_thread=False,  # used from worker threads, one call at a time
             )
             conn.row_factory = sqlite3.Row
             self._connection = conn
