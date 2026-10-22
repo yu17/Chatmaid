@@ -9,10 +9,10 @@ from chatmaid.connectors.evolution.connector import EvolutionConnector
 from chatmaid.model import SourceRef
 
 
-def test_iter_messages_dedups_across_folders(fake_env):
+def test_iter_messages_yields_every_copy_across_folders(fake_env):
     msgs = [m for m in fake_env.connector.iter_messages() if m.ref.account == "a1"]
-    assert [m.ref.folder for m in msgs if m.message_id == "<a@x>"] == ["INBOX"]
-    assert "[Gmail]/All Mail" not in [m.ref.folder for m in msgs]
+    copies = {(m.ref.folder, m.ref.uid) for m in msgs if m.message_id == "<a@x>"}
+    assert copies == {("INBOX", "1"), ("[Gmail]/All Mail", "9")}
 
 
 def test_folder_order_sent_inbox_rest(fake_env):
@@ -20,7 +20,8 @@ def test_folder_order_sent_inbox_rest(fake_env):
     for m in fake_env.connector.iter_messages():
         if m.ref.account == "a1" and m.ref.folder not in folders:
             folders.append(m.ref.folder)
-    assert folders == ["[Gmail]/Sent Mail", "INBOX", "News"]
+    assert folders[:2] == ["[Gmail]/Sent Mail", "INBOX"]
+    assert set(folders) == {"[Gmail]/Sent Mail", "INBOX", "News", "[Gmail]/All Mail"}
 
 
 def test_skip_folders_are_not_read(fake_env):

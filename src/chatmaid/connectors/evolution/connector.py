@@ -132,15 +132,12 @@ class EvolutionConnector:
         after = after or {}
         for account in self._accounts:
             cache = self._cache(account.uid)
-            seen: set[str] = set()
+            # Every row is yielded, duplicates included: the store deduplicates by Message-ID,
+            # and the ingest watermark must advance past duplicate rows too.
             for folder in self._folders(account):
                 try:
                     for row in cache.iter_rows(folder, after=after.get(f"{account.uid}/{folder.name}")):
                         msg = self._from_row(account, cache, folder, row)
-                        if msg.message_id is not None:
-                            if msg.message_id in seen:
-                                continue
-                            seen.add(msg.message_id)
                         if since is not None and msg.sent_at < since:
                             continue
                         yield msg
@@ -150,13 +147,8 @@ class EvolutionConnector:
         if local is not None:
             mbox = mailbox.Maildir(local, factory=None, create=False)
             try:
-                seen_local: set[str] = set()
                 for key in mbox.iterkeys():
                     msg = self._local_message(key, mbox.get_bytes(key))
-                    if msg.message_id is not None:
-                        if msg.message_id in seen_local:
-                            continue
-                        seen_local.add(msg.message_id)
                     if since is not None and msg.sent_at < since:
                         continue
                     yield msg

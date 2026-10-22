@@ -172,3 +172,20 @@ def test_rolled_back_batch_is_not_counted(fake_env, store, monkeypatch):
     monkeypatch.setattr(store, "set_checkpoint", flaky)
     stats = InitPipeline(store, fake_env.connector, FakeLLM(), fake_env.config).ingest(InitOptions())
     assert stats.messages == stats.new_messages + stats.skipped_dup
+
+
+def test_ingest_keeps_one_row_per_message_id(fake_env, store):
+    st = _pipeline(fake_env, store).ingest(InitOptions(passes=("ingest",)))
+    n = store._conn.execute("SELECT COUNT(*) FROM message WHERE message_id = '<a@x>'").fetchone()[0]
+    assert n == 1
+    assert st.skipped_dup >= 1
+
+
+def test_ingest_watermark_covers_duplicate_rows_so_watch_routes_nothing(fake_env, store):
+    add_row(fake_env.db_path, "[Gmail]/All Mail", uid="8", message_id="<am8@x>", sender="Zed <zed@x.org>",
+            to="me@x.org", date=1_600_000_100, body="old unique")
+    _pipeline(fake_env, store).ingest(InitOptions(since=1_650_000_000))
+    assert store.get_checkpoint("ingest", "a1/[Gmail]/All Mail")["last_uid"] == 9
+    watcher = Watcher(store, fake_env.connector, EventSource([fake_env.db_path], enable_dbus=False))
+    assert watcher.handle_trigger("timer") == 0
+    assert store.events() == []
