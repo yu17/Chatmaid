@@ -13,7 +13,7 @@ def test_fake_llm_records_calls_and_fails_on_request():
     with pytest.raises(LLMError):
         f.complete(system="SUM\nmore", user="u", model="m")
     assert f.complete(system="# SUM\nmore", user="u", model="m") == '{"summary": "s"}'
-    assert len(f.calls) >= 1
+    assert len(f.calls) == 2
     assert set(f.calls[-1]) == {"system", "user", "model", "json_schema", "max_tokens", "temperature"}
 
 

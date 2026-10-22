@@ -25,9 +25,6 @@ class FakeLLM:
         max_tokens: int = 1024,
         temperature: float = 0.3,
     ) -> str:
-        if self._failures > 0:
-            self._failures -= 1
-            raise LLMError("timeout")
         self.calls.append(
             {
                 "system": system,
@@ -38,7 +35,10 @@ class FakeLLM:
                 "temperature": temperature,
             }
         )
-        key = system.split("\n", 1)[0].removeprefix("# ")
+        if self._failures > 0:
+            self._failures -= 1
+            raise LLMError("timeout")
+        key =system.split("\n", 1)[0].removeprefix("# ")
         return self.responses.get(key, "{}")
 
     def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
