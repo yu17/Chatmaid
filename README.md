@@ -121,7 +121,7 @@ Notes:
 
 Cloud improvement is optional and always owner-triggered. `draft cloud ID`
 stores a proposal, prints the exact pseudonymized payload (names, addresses,
-and phone numbers become `[PERSON_n]`, `[EMAIL_n]`, `[PHONE_n]`; amounts too if
+and phone numbers become `[PERSON_n]`, `[EMAIL_n]`, `[PHONE_n]`, and URLs and bare domains `[URL_n]`; amounts too if
 `cloud.redact_amounts = true`), and sends nothing. Only `draft send ID`
 transmits that stored payload, byte for byte, after you confirm; `draft decline
 ID` discards it. The watcher never calls a cloud backend. The payload holds the
