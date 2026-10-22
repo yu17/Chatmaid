@@ -77,9 +77,9 @@ Run commands as `uv run chatmaid [--config PATH] <command>` (default config is
 | `show ID` | `--limit N` | show one conversation |
 | `lookup QUERY` | `--contact`, `--since`, `--until`, `--limit N`, `--no-vector` | search message history |
 | `watch` | `--interval SECONDS`, `--no-dbus`, `--no-draft` | route newly arrived mail until interrupted; triage and draft replies unless `--no-draft` |
-| `drafts` | `--status {pending,all}`, `--limit N` | list reply drafts |
+| `drafts` | `--status {pending,all}`, `--limit N` | list reply drafts with the text `draft approve` would approve (candidate 1 of the latest round) |
 | `draft show ID` | | show a draft with its versions and cloud calls |
-| `draft run` | `--message ID`, `--fake-llm` | triage and draft one stored message |
+| `draft run` | `--message ID`, `--fake-llm` | triage and draft one stored message (the retry for a failed or skipped draft) |
 | `draft regenerate ID` | `--comment TEXT`, `--from VERSION`, `--fake-llm` | write a new round of candidates from a comment |
 | `draft approve ID` | `--version N` | approve a version |
 | `draft edit ID` | `--text TEXT` or `--file PATH` (one required) | replace the text with your own |
@@ -101,19 +101,34 @@ Notes:
   three triggers; locked databases are retried on the next trigger. It listens
   for Evolution's `Newmail` D-Bus signal, watches `folders.db` for changes, and
   polls every `--interval` seconds; `--no-dbus` disables the signal.
+- `watch` prints one line per routed message, `<incoming|owner>  conv <conversation
+  id>  msg <message id>  <sender>  <subject>`. On Ctrl-C or SIGTERM during a scan
+  it finishes the message in hand (including its triage and draft), keeps the
+  rest for the next start, and exits.
 
 ## Draft flow
 
 - Triage runs on each newly routed incoming message (`watch`, or `draft run
   --message ID` by hand). Categories: `needs_reply`, `informational`, `bulk`,
   `system`, `unknown`. Only `needs_reply` produces a draft; a message whose body
-  is not cached yields no draft.
+  is not cached yields no draft. Mail sent more than `draft.max_age_days`
+  (default 14) days ago is `informational` by rule, without a model call, in
+  both `watch` and `draft run`.
+- When a draft cannot be written (for example LM Studio is down), the message
+  stays indexed and a `draft_failed` event records the error and the message id;
+  `draft run --message ID` retries it.
 - A draft stores the generated candidate texts in full, the language, and a
   context record (contact card, summary, recent previews, memories, style
   profile). The owner's own sent text is referenced, never copied.
 - One pending draft exists per conversation; a newer incoming message marks the
-  old one `superseded`. Statuses: `pending`, `approved`, `edited`, `dismissed`,
-  `superseded`.
+  old one `superseded` once the new draft is written (a failed draft leaves the
+  old one pending). When a reply joins two conversations that both have a pending
+  draft, the older draft is superseded. Statuses: `pending`, `approved`, `edited`,
+  `dismissed`, `superseded`.
+- When your own reply in the conversation shows up in a Sent folder, the pending
+  draft is resolved: `approved` if what you wrote, without the quoted history
+  (`On ... wrote:`, `-----Original Message-----`, `在...写道`, `>` lines) and the
+  `-- ` signature, equals a candidate or starts with one; `edited` otherwise.
 - `draft regenerate --comment` writes a new round from your feedback.
 - `approve` records that you accept a version. It sends nothing and writes
   nothing to Evolution or a mail server; you still send the reply yourself.
@@ -136,9 +151,20 @@ characters of the message being answered. The placeholder map stays local.
 Review the payload yourself: free text such as signatures can still carry
 details the pseudonymizer does not recognise.
 
-Both CLIs run tool-less and stateless in an empty temporary directory:
+A cloud call is `proposed` until you answer. Consent is recorded (`sending`,
+with its time) before anything is transmitted; the call then ends `sent`,
+`failed` or, if you decline, `declined`. A send interrupted by Ctrl-C or a
+crash is marked `failed` with `interrupted: <reason>`, and a call that is not
+`proposed` can never be sent again: propose a new one. EOF or Ctrl-C at the
+consent prompt declines.
 
-- codex: `codex exec --ephemeral --ignore-user-config --ignore-rules -s read-only -C <empty temp dir> --skip-git-repo-check --color never --output-schema <schema file> -o <out file> -m <model> <prompt>`
+Both CLIs run stateless in an empty temporary directory. claude gets no tools
+(`--tools ""`). codex runs with its shell, unified exec, code-mode host, apps,
+multi-agent, plugin, browser-use and computer-use features disabled, so the
+model can only answer in text, and with its read-only sandbox kept as a second
+line of defence:
+
+- codex: `codex exec --ephemeral --ignore-user-config --ignore-rules --disable shell_tool --disable unified_exec --disable code_mode_host --disable apps --disable multi_agent --disable plugins --disable browser_use --disable computer_use -s read-only -C <empty temp dir> --skip-git-repo-check --color never --output-schema <schema file> -o <out file> [-m <model>] <prompt>`
 - claude: `claude -p --tools "" --no-session-persistence --setting-sources "" --disable-slash-commands --strict-mcp-config --output-format json --json-schema <schema json> [--model <m>] <prompt>`
 
 `--bare` cannot be used with claude: it restricts auth to `ANTHROPIC_API_KEY`,
@@ -169,3 +195,9 @@ with a canned prompt that carries no mail content.
   indexes it.
 - An index built with `--since` before checkpoints were recorded needs one
   `init --reset-checkpoints` before a complete-history ingest.
+- There is no automatic queue of untriaged messages yet (planned for phase 1c).
+  A message whose draft failed, or that was routed just before `watch` was
+  killed hard, is indexed but not drafted until you run `draft run --message
+  ID` (the id is in the `watch` line and the `draft_failed` event).
+- `watch` stops between messages, not inside a model call: a stop request waits
+  for the triage and draft of the message in hand.

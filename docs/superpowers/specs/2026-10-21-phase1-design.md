@@ -64,8 +64,11 @@ spirit: daemon first, UI last.
 
 Adopted with caveats. `claude -p` and `codex exec` work as cloud backends and
 use the owner's existing subscriptions, so no API keys are needed. Both must be
-run so they cannot touch local files: `claude -p --tools "" --no-session-persistence --setting-sources "" --disable-slash-commands --strict-mcp-config ...` and
-`codex exec --ephemeral -s read-only -C <empty dir> ...`. Both add a few
+run so they cannot touch local files: `claude -p --tools "" --no-session-persistence --setting-sources "" --disable-slash-commands --strict-mcp-config --output-format json --json-schema <schema> [--model <m>] <prompt>` and
+`codex exec --ephemeral --ignore-user-config --ignore-rules --disable shell_tool --disable unified_exec --disable code_mode_host --disable apps --disable multi_agent --disable plugins --disable browser_use --disable computer_use -s read-only -C <empty dir> --skip-git-repo-check --color never --output-schema <file> -o <file> [-m <m>] <prompt>`
+(`-s read-only` alone still lets the model's shell read the whole filesystem, so
+every codex feature that runs or reaches anything is disabled; the sandbox stays
+as defence in depth). Both add a few
 seconds of process start-up per call, which is fine for on-demand refinement
 and not for the per-message hot path. Both sit behind one provider interface so
 API-key backends can be added later. Note that in codex, `-p` selects a
@@ -245,8 +248,11 @@ gpt-oss-120b. Roles:
   the project root (gitignored, owner-provided).
 
 Cloud, owner-triggered only, through a provider interface with two initial
-backends: `codex exec --ephemeral -s read-only -C <empty dir>
---output-schema <file> -m <m>` (the default cloud writer) and `claude -p --tools ""
+backends: `codex exec --ephemeral --ignore-user-config --ignore-rules --disable shell_tool
+--disable unified_exec --disable code_mode_host --disable apps --disable multi_agent
+--disable plugins --disable browser_use --disable computer_use -s read-only -C <empty dir>
+--skip-git-repo-check --color never --output-schema <file> -o <file> [-m <m>]` (the default
+cloud writer) and `claude -p --tools ""
 --no-session-persistence --setting-sources "" --disable-slash-commands
 --strict-mcp-config --output-format json --json-schema <schema> [--model <m>]`
 (`--bare` is not used: it restricts auth to `ANTHROPIC_API_KEY`, and the owner
