@@ -142,3 +142,19 @@ def test_set_tracked_excludes_from_needing_summary(store):
     assert [r["id"] for r in store.conversations()] == [cid]
     store.set_tracked(cid, True)
     assert len(store.conversations(needing_summary=True)) == 1
+
+
+def test_search_messages_filters_and_accessors(ingested_env):
+    s = ingested_env.store
+    rows = s.search_messages(text="hello")
+    assert rows and all("hello" in (r["preview"] or "").lower() or "hello" in (r["subject"] or "").lower() for r in rows)
+    assert s.search_messages(sender="ann@x.org")
+    assert s.search_messages(sender="nobody-here") == []
+    newest = s.search_messages()[0]["sent_at"]
+    assert s.search_messages(since=newest + 1) == []
+    assert s.search_messages(until=newest) != s.search_messages()
+    cid = s.search_messages()[0]["conversation_id"]
+    assert s.conversation(cid)["id"] == cid and s.conversation(99999) is None
+    assert s.memory(99999) is None
+    assert s.participant_labels(cid)
+    assert s.identity_label(None) == "?"

@@ -264,6 +264,62 @@ class Store:
         params.append(limit)
         return self._conn.execute(sql, params).fetchall()
 
+    def search_messages(
+        self,
+        *,
+        text: str | None = None,
+        sender: str | None = None,
+        since: int | None = None,
+        until: int | None = None,
+        limit: int = 50,
+    ) -> list[sqlite3.Row]:
+        sql = (
+            "SELECT m.* FROM message m LEFT JOIN identity i ON i.id = m.sender_identity_id "
+            "WHERE 1=1"
+        )
+        params: list = []
+        if text:
+            sql += " AND (m.subject LIKE ? OR m.preview LIKE ?)"
+            params += [f"%{text}%"] * 2
+        if sender:
+            sql += " AND (i.address LIKE ? OR i.display_name LIKE ?)"
+            params += [f"%{sender}%"] * 2
+        if since is not None:
+            sql += " AND m.sent_at >= ?"
+            params.append(since)
+        if until is not None:
+            sql += " AND m.sent_at < ?"
+            params.append(until)
+        sql += " ORDER BY m.sent_at DESC, m.id DESC LIMIT ?"
+        params.append(limit)
+        return self._conn.execute(sql, params).fetchall()
+
+    def conversation(self, conversation_id: int) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT * FROM conversation WHERE id = ?", (conversation_id,)
+        ).fetchone()
+
+    def memory(self, memory_id: int) -> sqlite3.Row | None:
+        return self._conn.execute("SELECT * FROM memory WHERE id = ?", (memory_id,)).fetchone()
+
+    def participant_labels(self, conversation_id: int) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT COALESCE(NULLIF(c.name, ''), (SELECT MIN(address) FROM identity "
+            "WHERE contact_id = c.id), '?') AS label FROM conversation_participant p "
+            "JOIN contact c ON c.id = p.contact_id WHERE p.conversation_id = ? ORDER BY c.id",
+            (conversation_id,),
+        ).fetchall()
+        return [r["label"] for r in rows]
+
+    def identity_label(self, identity_id: int | None) -> str:
+        if identity_id is None:
+            return "?"
+        row = self._conn.execute(
+            "SELECT COALESCE(NULLIF(display_name, ''), address) AS label FROM identity WHERE id = ?",
+            (identity_id,),
+        ).fetchone()
+        return row["label"] if row else "?"
+
     def owner_message_refs(self, *, limit: int) -> list[SourceRef]:
         rows = self._conn.execute(
             "SELECT ref_key FROM message WHERE is_owner = 1 AND bulk = 0 "
