@@ -64,7 +64,7 @@ spirit: daemon first, UI last.
 
 Adopted with caveats. `claude -p` and `codex exec` work as cloud backends and
 use the owner's existing subscriptions, so no API keys are needed. Both must be
-run so they cannot touch local files: `claude -p --bare --tools "" ...` and
+run so they cannot touch local files: `claude -p --tools "" --no-session-persistence --setting-sources "" --disable-slash-commands --strict-mcp-config ...` and
 `codex exec --ephemeral -s read-only -C <empty dir> ...`. Both add a few
 seconds of process start-up per call, which is fine for on-demand refinement
 and not for the per-message hot path. Both sit behind one provider interface so
@@ -246,9 +246,11 @@ gpt-oss-120b. Roles:
 
 Cloud, owner-triggered only, through a provider interface with two initial
 backends: `codex exec --ephemeral -s read-only -C <empty dir>
---output-schema <file> -m <m>` (the default cloud writer) and `claude -p
---bare --tools "" --no-session-persistence --output-format json
---json-schema <schema> --model <m>`, selectable per request in the UI. Both
+--output-schema <file> -m <m>` (the default cloud writer) and `claude -p --tools ""
+--no-session-persistence --setting-sources "" --disable-slash-commands
+--strict-mcp-config --output-format json --json-schema <schema> [--model <m>]`
+(`--bare` is not used: it restricts auth to `ANTHROPIC_API_KEY`, and the owner
+logs in through OAuth), selectable per request in the UI. Both
 see only the pseudonymized payload. API-key backends can be added later
 behind the same interface.
 

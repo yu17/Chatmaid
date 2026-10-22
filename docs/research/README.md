@@ -60,3 +60,5 @@ Prior art
 - Discord forbids automating a user account even read-only. The compliant path
   is an official bot in servers the owner controls; bots can never read DMs.
 - Email is easy: IMAP IDLE plus a Drafts folder plus SMTP on approval.
+
+The verified cloud CLI invocations (codex and claude, tool-less and stateless) are in [`docs/superpowers/plans/2026-10-22-phase1b-reply-drafts.md`](../superpowers/plans/2026-10-22-phase1b-reply-drafts.md), Global Constraints.
