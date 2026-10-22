@@ -49,8 +49,8 @@ mkdir -p data && cp config.example.toml data/config.toml
 
 Edit `data/config.toml` (owner name and aliases, Evolution account uids).
 Put the LM Studio API token in the file named by `lmstudio.token_file`
-(default `LMStudio_token.txt` at the project root; gitignored). LM Studio must
-be running on `127.0.0.1:40090` with "Require Authentication" enabled.
+(default `LMStudio_token.txt` at the project root; gitignored); `init --pass ingest`
+runs without it. LM Studio must be running on `127.0.0.1:40090` with "Require Authentication" enabled.
 
 ## Running
 

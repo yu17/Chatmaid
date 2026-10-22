@@ -32,3 +32,12 @@ def test_read_token_missing_raises(tmp_path):
 def test_cli_version(capsys):
     assert main(["--version"]) == 0
     assert capsys.readouterr().out.strip() == f"chatmaid {__version__}"
+
+
+def test_defaults_mirror_example_config():
+    import tomllib
+
+    from chatmaid.config import _DEFAULTS
+
+    with open("config.example.toml", "rb") as f:
+        assert tomllib.load(f) == _DEFAULTS

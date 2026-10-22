@@ -44,6 +44,8 @@ class LMStudioClient:
             resp = self._client.chat.completions.create(**kwargs)
         except openai.OpenAIError as e:
             raise LLMError(str(e)) from e
+        if not resp.choices:
+            raise LLMError("the completion response has no choices")
         return resp.choices[0].message.content or ""
 
     def embed(self, texts: list[str], *, model: str) -> list[list[float]]:

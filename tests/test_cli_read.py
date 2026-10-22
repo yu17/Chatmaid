@@ -4,6 +4,7 @@ import pytest
 
 from chatmaid.cli import main
 from chatmaid.init.pipeline import InitOptions, InitPipeline
+from chatmaid.llm.base import LLMError
 from chatmaid.llm.fake import FakeLLM
 from chatmaid.store import Store
 
@@ -56,3 +57,52 @@ def test_cli_lookup_no_vector(cli_env, capsys):
     assert main(["--config", cfg, "lookup", "hello", "--no-vector", "--since", "2020-01-01"]) == 0
     out = capsys.readouterr().out
     assert re.match(r"\d{4}-\d{2}-\d{2}  ", out) and "hello" in out.lower()
+
+
+def test_cli_init_ingest_needs_no_token(fake_env, capsys):
+    assert not fake_env.config.lmstudio.token_file.exists()
+    assert main(["--config", str(fake_env.config_path), "init", "--pass", "ingest"]) == 0
+    assert capsys.readouterr().out.startswith("ingest: IngestStats(")
+    store = Store(fake_env.config.index_path, embedding_dim=4)
+    try:
+        assert store.counts()["messages"] >= 3
+    finally:
+        store.close()
+
+
+def test_cli_init_model_pass_without_token_fails_cleanly(fake_env, capsys):
+    assert main(["--config", str(fake_env.config_path), "init", "--pass", "digest"]) == 1
+    assert "token" in capsys.readouterr().err.lower()
+
+
+def test_cli_init_reports_llm_error(fake_env, monkeypatch, capsys):
+    import chatmaid.cli as cli
+
+    def broken(self, opts):
+        raise LLMError("embedding model returned garbage")
+
+    monkeypatch.setattr(cli.InitPipeline, "run", broken)
+    assert main(["--config", str(fake_env.config_path), "init", "--pass", "embed", "--fake-llm"]) == 1
+    assert "embedding model returned garbage" in capsys.readouterr().err
+
+
+def test_cli_llm_check_uses_grammar_mode(fake_env, monkeypatch, capsys):
+    import chatmaid.cli as cli
+
+    fake_env.config.lmstudio.token_file.write_text("tok\n")
+    captured = {}
+
+    class Stub:
+        def __init__(self, *a, **k):
+            pass
+
+        def list_models(self):
+            return ["m"]
+
+        def complete(self, **kw):
+            captured.update(kw)
+            return "OK"
+
+    monkeypatch.setattr(cli, "LMStudioClient", Stub)
+    assert main(["--config", str(fake_env.config_path), "llm-check"]) == 0
+    assert captured["think"] is True and "reply: OK" in capsys.readouterr().out

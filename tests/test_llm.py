@@ -68,3 +68,14 @@ def test_lmstudio_client_think_false_prefills_and_skips_response_format(monkeypa
     assert [m["role"] for m in captured["messages"]] == ["system", "user"]
 
 
+def test_lmstudio_client_empty_choices_is_an_llm_error(monkeypatch):
+    class FakeCompletions:
+        def create(self, **kw):
+            return SimpleNamespace(choices=[])
+
+    c = LMStudioClient("http://127.0.0.1:1/v1", "tok")
+    monkeypatch.setattr(c._client.chat, "completions", FakeCompletions())
+    with pytest.raises(LLMError):
+        c.complete(system="s", user="u", model="m")
+
+

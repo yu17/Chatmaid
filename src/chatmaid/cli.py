@@ -77,6 +77,7 @@ def _llm_check_command(args: argparse.Namespace) -> int:
             user="ping",
             model=cfg.lmstudio.model_small,
             max_tokens=8,
+            think=True,  # grammar mode: what digest uses on model_small
         )
     except LLMError as e:
         print(f"llm-check failed: {e}", file=sys.stderr)
@@ -100,20 +101,32 @@ def _open_store(cfg) -> Store:
     return Store(cfg.index_path, embedding_dim=cfg.lmstudio.embedding_dim)
 
 
+class _NoLLM:
+    """Stands in when no requested pass talks to a model (ingest only): no token is needed."""
+
+    def complete(self, **_) -> str:
+        raise LLMError("this run was started without an LM Studio client")
+
+    def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
+        raise LLMError("this run was started without an LM Studio client")
+
+
 def _init_command(args: argparse.Namespace) -> int:
     cfg = load_config(Path(args.config))
     accounts = load_accounts(cfg.email.evolution_config_dir, cfg.email.accounts)
     owner = OwnerIdentity.from_accounts(accounts, cfg.owner.extra_addresses, cfg.owner.aliases)
-    connector = EvolutionConnector(cfg.email, accounts, owner)
+    passes = ("ingest", "digest", "style", "embed") if args.pass_name == "all" else (args.pass_name,)
     if args.fake_llm:
         llm = FakeLLM()
+    elif all(name == "ingest" for name in passes):
+        llm = _NoLLM()  # the client (and its token) is only built for passes that call a model
     else:
         try:
             llm = LMStudioClient(cfg.lmstudio.base_url, read_token(cfg), timeout_s=cfg.lmstudio.timeout_s)
         except ConfigError as e:
             print(str(e), file=sys.stderr)
             return 1
-    passes = ("ingest", "digest", "style", "embed") if args.pass_name == "all" else (args.pass_name,)
+    connector = EvolutionConnector(cfg.email, accounts, owner)
     opts = InitOptions(since=args.since, limit_conversations=args.limit, passes=passes)
     store = _open_store(cfg)
     try:
@@ -121,6 +134,9 @@ def _init_command(args: argparse.Namespace) -> int:
             print(f"cleared {store.clear_checkpoints('ingest')} ingest checkpoints")
         for name, stats in InitPipeline(store, connector, llm, cfg).run(opts).items():
             print(f"{name}: {stats}")
+    except LLMError as e:
+        print(f"init failed: {e}", file=sys.stderr)
+        return 1
     finally:
         store.close()
         connector.close()

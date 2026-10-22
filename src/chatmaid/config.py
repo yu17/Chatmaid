@@ -79,7 +79,7 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
         "token_file": "LMStudio_token.txt",
         "model_small": "qwen/qwen3-4b-2507",
         "model_main": "qwen/qwen3.5-35b-a3b",
-        "model_heavy": "qwen/qwen3.5-35b-a3b",
+        "model_heavy": "qwen3.5-122b-a10b",
         "model_embedding": "text-embedding-qwen3-embedding-0.6b",
         "embedding_dim": 1024,
         "timeout_s": 600,
