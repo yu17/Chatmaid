@@ -1,11 +1,15 @@
 """Command-line entry point. Later tasks add commands via register_<name>(subparsers)."""
 
 import argparse
+import sys
 
 from pathlib import Path
 
 from chatmaid import __version__
+from chatmaid.config import ConfigError, read_token
 from chatmaid.config import load as load_config
+from chatmaid.llm.base import LLMError
+from chatmaid.llm.lmstudio import LMStudioClient
 from chatmaid.connectors.evolution.connector import EvolutionConnector
 from chatmaid.connectors.evolution.sources import load_accounts
 from chatmaid.identity import OwnerIdentity
@@ -46,6 +50,35 @@ def register_scan(subparsers) -> None:
     p.set_defaults(handler=_scan_command)
 
 
+def _llm_check_command(args: argparse.Namespace) -> int:
+    cfg = load_config(Path(args.config))
+    try:
+        token = read_token(cfg)
+    except ConfigError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    client = LMStudioClient(cfg.lmstudio.base_url, token, timeout_s=cfg.lmstudio.timeout_s)
+    try:
+        for model_id in client.list_models():
+            print(model_id)
+        reply = client.complete(
+            system="Reply with the single word OK.",
+            user="ping",
+            model=cfg.lmstudio.model_small,
+            max_tokens=8,
+        )
+    except LLMError as e:
+        print(f"llm-check failed: {e}", file=sys.stderr)
+        return 1
+    print(f"reply: {reply}")
+    return 0
+
+
+def register_llm_check(subparsers) -> None:
+    p = subparsers.add_parser("llm-check", help="list LM Studio models and run one completion")
+    p.set_defaults(handler=_llm_check_command)
+
+
 def build_parser() -> tuple[argparse.ArgumentParser, argparse._SubParsersAction]:
     parser = argparse.ArgumentParser(prog="chatmaid")
     parser.add_argument("--version", action="store_true", help="print version and exit")
@@ -53,6 +86,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, argparse._SubParsersAction]
     subparsers = parser.add_subparsers(dest="command")
     register_accounts(subparsers)
     register_scan(subparsers)
+    register_llm_check(subparsers)
     return parser, subparsers
 
 
