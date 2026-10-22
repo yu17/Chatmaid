@@ -35,3 +35,8 @@ Thumbs.db
 
 # Claude Code worktrees (created under .claude/worktrees/)
 .claude/worktrees/
+
+# LM Studio API token and any other token files
+LMStudio_token.txt
+*_token.txt
+*.token

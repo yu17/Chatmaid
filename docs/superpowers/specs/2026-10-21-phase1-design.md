@@ -1,9 +1,9 @@
 # chatmaid phase 1: headless daemon, email connector, local web UI
 
-Status: **DRAFT v2, not approved.** Rewritten 2026-10-21 after the owner's
-answers to v1. Nothing has been built. Section 11 lists what the owner still
-has to decide; section 12 lists the calls I made so they can be checked.
-Research behind this document: `docs/research/`.
+Status: **APPROVED 2026-10-22** (v2 plus the owner's answers recorded in
+section 11). Section 12 lists the calls I made so they can be checked.
+Research behind this document: `docs/research/`. Implementation plans:
+`docs/superpowers/plans/`.
 
 ## 1. Intent
 
@@ -157,12 +157,13 @@ Tier 2, index (warm, small): derived data only.
 - `cloud_call`: audit log of every cloud request: backend, pseudonymized
   payload, consent decision, response hash, time.
 
-Tier 3, hot window: `message` rows for the last N months (owner: one to two
-years) of tracked conversations, holding sender, time, kind, a short preview,
-derived labels, and a source reference. The full text is read from the source
-on demand through the connector, so nothing is duplicated. Older messages
-leave the hot window at rollover and remain reachable through the history
-lookup tool.
+Tier 3, hot window: `message` rows hold, for every message seen, only the
+sender, time, kind, subject, a short preview (at most 200 characters),
+derived labels, and a source reference; the full text is read from the
+source on demand through the connector, so nothing is duplicated. The hot
+window is the date-bounded view of those rows (owner: one year) that the
+drafting path uses for context; older rows stay only so that the digest is
+resumable and the history lookup tool can find them.
 
 History lookup on demand: a `search_history(query, contact, date range)` tool
 that queries the archive directly (Evolution `folders.db` plus body files;
@@ -221,19 +222,33 @@ Gemma 4 26B-A4B, GLM-4.7-Flash 30B-A3B, GLM-4.6V-Flash 9B, Qwen3-4B,
 gpt-oss-120b. Roles:
 
 - Triage, PII tagging, chunk summaries: Qwen3-4B (fast, always loadable).
-- Reply drafting and rolling summaries: Qwen3.5-35B-A3B by default (Chinese
-  and English, fast MoE); Gemma 4 26B-A4B and GLM-4.7-Flash as alternatives
-  to compare on a private eval set built from the owner's own threads.
-- Embeddings: a multilingual model is needed for Chinese; candidates are
-  bge-m3 or Qwen3-Embedding-0.6B, run either in LM Studio or in-process. The
-  present nomic model stays for English-only experiments.
+- Hot path (reply drafting, rolling summaries): Qwen3.5-35B-A3B at the
+  6-bit quantization already on disk (29 GB; attention on the GPU, some
+  experts on the CPU). Gemma 4 26B-A4B and GLM-4.7-Flash are compared on a
+  private eval set built from the owner's own threads.
+- Heavy path (initial digest, style profile, deep summaries), the "most
+  capable model that fits with CPU layers": Qwen3.5-122B-A10B, unsloth
+  UD-Q4_K_XL, 77 GB (verified from the Hugging Face file listing), loaded
+  with LM Studio's MoE expert-offload-to-CPU setting; 10B active parameters
+  keep it usable with experts in system RAM. The 6-bit build of this model
+  would be over 100 GB and does not fit beside everything else in 124 GB of
+  RAM, so 4-bit dynamic is the sensible quantization here. For models of 35B
+  and below, 6-bit stays the rule. The already-downloaded gpt-oss-120b is
+  compared in the same eval but is English-leaning.
+- Embeddings: a multilingual model is needed for Chinese; the owner downloads
+  Qwen3-Embedding-0.6B (GGUF, Q8_0, about 0.6 GB; 1024 dimensions) in LM
+  Studio, or bge-m3 (about 1.2 GB, 1024 dimensions) if the first is not
+  offered. The present nomic model stays for English-only experiments.
 - LM Studio loads models just in time with a cold start of about a minute and
   an idle unload; the daemon tolerates that and can pin models with `lms load`.
+  The server requires an API token; it is read from `LMStudio_token.txt` at
+  the project root (gitignored, owner-provided).
 
 Cloud, owner-triggered only, through a provider interface with two initial
-backends: `claude -p --bare --tools "" --no-session-persistence
---output-format json --json-schema <schema> --model <m>` and `codex exec
---ephemeral -s read-only -C <empty dir> --output-schema <file> -m <m>`. Both
+backends: `codex exec --ephemeral -s read-only -C <empty dir>
+--output-schema <file> -m <m>` (the default cloud writer) and `claude -p
+--bare --tools "" --no-session-persistence --output-format json
+--json-schema <schema> --model <m>`, selectable per request in the UI. Both
 see only the pseudonymized payload. API-key backends can be added later
 behind the same interface.
 
@@ -271,10 +286,24 @@ Read-only reader over Evolution's cache, verified on the workstation on
 A small FastAPI app bound to localhost, server-rendered pages with minimal
 JavaScript, mobile-first layout, exposed to the phone only through the owner's
 private proxy (no auth of its own in phase 1; the proxy is the boundary).
-Views: pending drafts (approve, edit, dismiss, "refine with cloud" with the
-payload preview), conversation view with summary and recent messages, contact
-and identity merge, init progress, cloud audit log. Approve in phase 1 means
-"record approval"; nothing is sent.
+Views: pending drafts, conversation view with summary and recent messages,
+contact and identity merge, init progress, cloud audit log.
+
+A draft defaults to the local model and offers two actions besides approve,
+edit and dismiss:
+
+- **Feedback and regenerate (local):** a comment box; the comment and the
+  previous draft go back to the local model, which produces a new version.
+  Every version is kept with its comment.
+- **Cloud improvement:** starts the Pattern A flow: build the pseudonymized
+  payload (previous draft, the owner's comment if any, redacted excerpt or
+  summary), show it exactly, let the owner pick the backend (codex by
+  default, claude or others as configured), send on consent, re-hydrate, and
+  show the result as a new version. The cloud version also takes feedback:
+  a comment sends a revise request through the same payload-preview-and-
+  consent step, never silently.
+
+Approve in phase 1 means "record approval"; nothing is sent.
 
 ## 10. Build order
 
@@ -286,22 +315,23 @@ and identity merge, init progress, cloud audit log. Approve in phase 1 means
 4. Web UI.
 5. WeChat importer, when the archive exists.
 
-## 11. Decisions the owner must make
+## 11. Owner's decisions (2026-10-22)
 
-1. **Hot window length:** one year or two. (Affects nothing structural; my
-   default is one year with summaries covering the rest.)
-2. **LM Studio access:** provide the server's API token for the data config,
-   or turn off "Require Authentication" for localhost.
-3. **Embedding model for Chinese:** allow downloading bge-m3 or
-   Qwen3-Embedding-0.6B (a few hundred MB to 1.2 GB).
-4. **Cloud default:** which backend and model to offer first in the UI
-   (`claude -p` with a given model, or `codex exec`), and the consent rule:
-   always show the payload and ask (my default), or auto-send for casual-tier
-   threads.
-5. **Evolution offline download** on yjq17 and jiaqi.yu1: optional, owner
-   action in Evolution's account settings.
-6. **Approve this document** so the implementation plan can be written. Any
-   write-capable test still gets its own go/no-go later.
+1. **Hot window:** one year.
+2. **LM Studio access:** token saved by the owner in `LMStudio_token.txt`
+   at the project root.
+3. **Embedding model:** the owner downloads what section 7 names, in LM
+   Studio.
+4. **Local model:** the most capable that fits with some CPU layers, at a
+   reasonable quantization (section 7: Qwen3.5-122B-A10B UD-Q4_K_XL for the
+   heavy path, Qwen3.5-35B-A3B 6-bit for the hot path).
+5. **Cloud default:** codex, with other backends selectable in the UI. The
+   consent rule is always show the payload and ask.
+6. **Draft actions:** local by default; feedback box with local regenerate;
+   cloud improvement with payload preview and consent, which also accepts
+   feedback and revises (section 9).
+7. **Evolution offline download** on yjq17 and jiaqi.yu1 remains optional.
+8. **Design approved.** Write-capable tests still get their own go/no-go.
 
 ## 12. Calls I made (check these)
 
