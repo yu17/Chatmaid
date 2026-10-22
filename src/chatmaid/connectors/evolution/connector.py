@@ -8,7 +8,7 @@ from pathlib import Path
 
 from chatmaid.config import EmailConfig
 from chatmaid.connectors.evolution import rfc822
-from chatmaid.connectors.evolution.cache import EvolutionCache, FolderInfo, MessageRow
+from chatmaid.connectors.evolution.cache import EvolutionCache, FolderInfo, MessageRow, is_numeric_uid
 from chatmaid.connectors.evolution.rfc822 import ParsedMail, parse_addresses
 from chatmaid.connectors.evolution.sources import EvolutionAccount
 from chatmaid.identity import OwnerIdentity
@@ -204,6 +204,12 @@ class EvolutionConnector:
             return None
         folder, mode = entry
         if mode == "int":
+            if not is_numeric_uid(ref.uid):
+                log.warning(
+                    "%s/%s: non-numeric uid %r in an integer-uid folder has no watermark",
+                    ref.account, ref.folder, ref.uid,
+                )
+                return None
             return int(ref.uid)
         row = cache.row(folder, ref.uid)
         return None if row is None else row.dreceived

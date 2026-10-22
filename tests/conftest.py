@@ -1,3 +1,5 @@
+import functools
+import hashlib
 import mailbox
 import re
 import sqlite3
@@ -75,6 +77,11 @@ def make_sources(tmp_path, accounts):
     return d
 
 
+def body_name(uid):
+    """Camel's body file name: the uid itself when numeric, else its SHA-256 hex digest."""
+    return uid if uid.isdigit() else hashlib.sha256(uid.encode()).hexdigest()
+
+
 def make_cache(tmp_path, account_uid, folders):
     """Build a fake Evolution cache; return the cache root (parent of <account_uid>/)."""
     acct = tmp_path / account_uid
@@ -120,7 +127,7 @@ def make_cache(tmp_path, account_uid, folders):
                 )
                 if "body" in r:
                     body_dir.mkdir(parents=True, exist_ok=True)
-                    (body_dir / r["uid"]).write_text(r["body"], encoding="utf-8")
+                    (body_dir / body_name(r["uid"])).write_text(r["body"], encoding="utf-8")
         conn.commit()
     finally:
         conn.close()
@@ -160,11 +167,40 @@ def add_time_folder(db_path, name, rows):
         conn.close()
 
 
-def _mail(msg_id, frm, to, date, body, extra=""):
+def add_row(db_path, folder, *, uid, message_id, sender, to, date, body, dreceived=None,
+            in_reply_to=None, references=(), subject="test"):
+    """Insert one row (and its body file, named as Camel would) into a folder of a fixture cache."""
+    extra = f"In-Reply-To: {in_reply_to}\n" if in_reply_to else ""
+    if references:
+        extra += "References: " + " ".join(references) + "\n"
+    conn = sqlite3.connect(db_path)
+    try:
+        fid = conn.execute("SELECT folder_id FROM folders WHERE folder_name = ?", (folder,)).fetchone()[0]
+        conn.execute(
+            f"INSERT INTO messages_{fid} (uid, flags, msg_type, dirty, size, dsent, dreceived,"
+            " subject, mail_from, mail_to, mail_cc) VALUES (?, 0, 0, 0, 0, ?, ?, ?, ?, ?, '')",
+            (uid, date, dreceived or date, subject, sender, to),
+        )
+        conn.execute(
+            f"UPDATE folders SET saved_count = (SELECT COUNT(*) FROM messages_{fid})"
+            " WHERE folder_id = ?",
+            (fid,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    body_dir = Path(db_path).parent / "folders" / folder.replace("/", "/subfolders/") / "cur" / "00"
+    body_dir.mkdir(parents=True, exist_ok=True)
+    (body_dir / body_name(uid)).write_text(
+        _mail(message_id, sender, to, date, body, extra, subject), encoding="utf-8"
+    )
+
+
+def _mail(msg_id, frm, to, date, body, extra="", subject="test"):
     when = format_datetime(datetime.fromtimestamp(date, timezone.utc))
     return (
         f"Message-ID: {msg_id}\nFrom: {frm}\nTo: {to}\n{extra}Date: {when}\n"
-        "Subject: test\nContent-Type: text/plain; charset=utf-8\n\n" + body + "\n"
+        f"Subject: {subject}\nContent-Type: text/plain; charset=utf-8\n\n" + body + "\n"
     )
 
 
@@ -315,29 +351,8 @@ def watch_env(ingested_env):
         finally:
             conn.close()
 
-    def add_row(folder, *, uid, message_id, sender, to, date, body, dreceived=None, in_reply_to=None):
-        extra = f"In-Reply-To: {in_reply_to}\n" if in_reply_to else ""
-        conn = _connect()
-        try:
-            fid = conn.execute("SELECT folder_id FROM folders WHERE folder_name = ?", (folder,)).fetchone()[0]
-            conn.execute(
-                f"INSERT INTO messages_{fid} (uid, flags, msg_type, dirty, size, dsent, dreceived,"
-                " subject, mail_from, mail_to, mail_cc) VALUES (?, 0, 0, 0, 0, ?, ?, ?, ?, ?, '')",
-                (uid, date, dreceived or date, body[:30], sender, to),
-            )
-            conn.execute(
-                f"UPDATE folders SET saved_count = (SELECT COUNT(*) FROM messages_{fid})"
-                " WHERE folder_id = ?",
-                (fid,),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        body_dir = env.db_path.parent / "folders" / folder.replace("/", "/subfolders/") / "cur" / "00"
-        body_dir.mkdir(parents=True, exist_ok=True)
-        (body_dir / uid).write_text(_mail(message_id, sender, to, date, body, extra), encoding="utf-8")
-
     watcher = Watcher(env.store, env.connector, EventSource([env.db_path], enable_dbus=False))
     return SimpleNamespace(
-        **vars(env), watcher=watcher, message=message, add_row=add_row, add_folder=add_folder
+        **vars(env), watcher=watcher, message=message,
+        add_row=functools.partial(add_row, env.db_path), add_folder=add_folder,
     )

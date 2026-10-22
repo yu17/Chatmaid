@@ -1,14 +1,24 @@
 """Read-only access to Evolution's CamelStoreDB cache (folders.db plus body files)."""
 
-import sqlite3
+import hashlib
+import logging
 import re
+import sqlite3
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote
 
-_BATCH = 500
+log = logging.getLogger(__name__)
+
 _NUMERIC = re.compile(r"^\d+$")
+# Camel escapes a short key it cannot use as a file name with g_uri_escape_string(key, this, TRUE).
+_CAMEL_SAFE = "/?()'*"
+
+
+def is_numeric_uid(uid: str) -> bool:
+    return _NUMERIC.match(uid) is not None
 
 
 @dataclass(frozen=True)
@@ -83,7 +93,12 @@ class EvolutionCache:
         return "time" if row is not None and not _NUMERIC.match(str(row[0])) else "int"
 
     def iter_rows(self, folder: FolderInfo, *, after: int | None = None) -> Iterator[MessageRow]:
-        """Rows past the watermark: uid > after (int mode) or dreceived >= after (time mode)."""
+        """Rows past the watermark: uid > after (int mode) or dreceived >= after (time mode).
+
+        The folder is read with one statement and materialised before the first row is
+        yielded: a statement left open while the consumer works would hold a read lock on
+        Evolution's live rollback-journal database and make its next COMMIT fail (ruling R19).
+        """
         sql = (
             "SELECT uid, flags, dsent, dreceived, subject, mail_from, mail_to, mail_cc, size"
             f" FROM messages_{int(folder.folder_id)}"
@@ -96,11 +111,10 @@ class EvolutionCache:
         sql += " ORDER BY dreceived, uid" if time_mode else " ORDER BY CAST(uid AS INTEGER)"
         cur = self._conn.execute(sql, params)
         try:
-            while batch := cur.fetchmany(_BATCH):
-                for r in batch:
-                    yield _to_row(r)
+            rows = [_to_row(r) for r in cur.fetchall()]
         finally:
             cur.close()
+        yield from rows
 
     def row(self, folder: FolderInfo, uid: str) -> MessageRow | None:
         r = self._conn.execute(
@@ -111,15 +125,45 @@ class EvolutionCache:
         return None if r is None else _to_row(r)
 
     def watermark(self, folder: FolderInfo, rows: Iterable[MessageRow]) -> int | None:
-        """Max uid (int mode) or max dreceived (time mode) over the rows read; None if no rows."""
+        """Max uid (int mode) or max dreceived (time mode) over the rows read; None if no rows.
+
+        A stray non-numeric uid in an int-mode folder is skipped with a warning.
+        """
         if self.uid_mode(folder) == "time":
             values = [r.dreceived for r in rows]
         else:
-            values = [int(r.uid) for r in rows]
+            values = []
+            for r in rows:
+                if is_numeric_uid(r.uid):
+                    values.append(int(r.uid))
+                else:
+                    log.warning(
+                        "%s: ignoring non-numeric uid %r in an integer-uid folder", folder.name, r.uid
+                    )
         return max(values) if values else None
 
     def folder_dir(self, name: str) -> Path:
         return self._root / "folders" / name.replace("/", "/subfolders/")
 
     def body_path(self, folder: FolderInfo, uid: str) -> Path | None:
-        return next(iter(sorted((self.folder_dir(folder.name) / "cur").glob(f"*/{uid}"))), None)
+        """The cached body file of `uid`, searched across the `cur/<hh>/` buckets.
+
+        Camel names the file after the uid itself (numeric IMAP uids), after the SHA-256 hex
+        digest of a long opaque uid (Exchange / Microsoft 365), or after the URI-escaped form
+        of a short uid with unsafe characters; the candidates are tried in that order.
+        """
+        cur = self.folder_dir(folder.name) / "cur"
+        if not cur.is_dir():
+            return None
+        names = dict.fromkeys(
+            (uid, hashlib.sha256(uid.encode()).hexdigest(), quote(uid, safe=_CAMEL_SAFE))
+        )
+        buckets = sorted(p for p in cur.iterdir() if p.is_dir())
+        for name in names:
+            if not name or "/" in name:
+                continue
+            for bucket in buckets:
+                candidate = bucket / name
+                if candidate.is_file():
+                    return candidate
+        return None

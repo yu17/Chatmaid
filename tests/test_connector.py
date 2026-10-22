@@ -3,7 +3,7 @@ import logging
 import sqlite3
 
 import pytest
-from conftest import add_time_folder
+from conftest import add_row, add_time_folder
 
 from chatmaid.connectors.evolution.connector import EvolutionConnector
 from chatmaid.model import SourceRef
@@ -124,3 +124,34 @@ def test_scan_new_baseline_of_time_mode_folder_excludes_newest_row(fake_env):
     add_time_folder(fake_env.db_path, "Exch", [("AQ3", 1_700_000_700)])
     refs, state = fake_env.connector.scan_new(state, baseline_missing=True)
     assert [r.uid for r in refs] == ["AQ3"]
+
+
+def test_iter_messages_paused_mid_folder_does_not_block_a_writer(fake_env):
+    add_time_folder(fake_env.db_path, "Big", [(f"AQ{i:04d}", 1_700_000_000 + i) for i in range(600)])
+    it = fake_env.connector.iter_messages()
+    assert next(m for m in it if m.ref.folder == "Big").ref.uid == "AQ0000"
+    writer = sqlite3.connect(fake_env.db_path, timeout=0.5)
+    try:
+        writer.execute("INSERT INTO keys VALUES ('probe', '1')")
+        writer.commit()
+    finally:
+        writer.close()
+    assert sum(m.ref.folder == "Big" for m in it) == 599
+
+
+def test_scan_new_tolerates_stray_non_numeric_uid(fake_env, caplog):
+    add_row(fake_env.db_path, "INBOX", uid="stray-uid", message_id="<stray@x>", sender="ann@x.org", to="me@x.org", date=1_700_000_900, body="stray")
+    with caplog.at_level(logging.WARNING):
+        refs, state = fake_env.connector.scan_new({})
+    assert state["a1/INBOX"] == 2 and "stray-uid" in {r.uid for r in refs}
+    assert fake_env.connector.watermark_for(SourceRef("evolution", "a1", "INBOX", "stray-uid")) is None
+    assert any("stray-uid" in r.getMessage() for r in caplog.records)
+
+
+def test_time_mode_folder_body_is_fetched(fake_env):
+    uid = "AQMkADAwATM0MDAAMS1hNjQ3LTQ5NGYtMDACLTAwCgBGAAAD"
+    add_time_folder(fake_env.db_path, "Exch", [("AQ1", 1_700_000_500)])
+    add_row(fake_env.db_path, "Exch", uid=uid, message_id="<ex2@x>", sender="bob@x.org", to="me@x.org", date=1_700_000_600, body="from exchange")
+    m = fake_env.connector.fetch(SourceRef("evolution", "a1", "Exch", uid))
+    assert not m.body_missing and m.message_id == "<ex2@x>" and "from exchange" in m.text
+    assert fake_env.connector.fetch(SourceRef("evolution", "a1", "Exch", "AQ1")).body_missing
