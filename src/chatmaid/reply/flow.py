@@ -1,12 +1,15 @@
 """Reply flow: triage incoming mail, draft replies, resolve drafts from the owner's own mail."""
 
+import hashlib
 import json
 import logging
 import sqlite3
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
-from chatmaid.cloud.base import CloudBackend
+from chatmaid.cloud.base import CLOUD_SCHEMA, CloudBackend, CloudError
+from chatmaid.cloud.pseudonym import Pseudonymizer, deny_list_for, tag_persons
 from chatmaid.cloud.registry import make_backend
 from chatmaid.config import Config
 from chatmaid.connectors.base import Connector
@@ -21,6 +24,14 @@ from chatmaid.store import Store
 from chatmaid.triage.classify import triage_message
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class CloudProposal:
+    call_id: int
+    backend: str
+    model: str
+    payload: str
 
 
 def _norm(text: str) -> str:
@@ -245,3 +256,104 @@ class ReplyFlow:
             store.set_draft_status(draft_id, "dismissed")
         else:
             raise ValueError(f"unknown action {action!r}")
+
+    # -- owner-consented cloud improvement -------------------------------
+
+    def propose_cloud(
+        self,
+        draft_id: int,
+        *,
+        backend: str | None = None,
+        comment: str | None = None,
+        from_version: int | None = None,
+    ) -> CloudProposal:
+        """Store the exact pseudonymized payload for the owner to inspect; sends nothing."""
+        draft = self._pending(draft_id)
+        b = self.backend_factory(backend)
+        previous = (
+            self._version(draft_id, from_version)["text"]
+            if from_version is not None
+            else self.latest_text(draft_id)
+        )
+        ctx = self._context_for(draft)
+        deny = deny_list_for(self.store, self.cfg, draft["conversation_id"])
+        try:
+            names = tag_persons(self.llm, self.cfg.lmstudio.model_small, previous + "\n" + ctx.message)
+        except LLMError as e:
+            log.warning("draft %s: person tagging failed (%s); using the deny list only", draft_id, e)
+            names = []
+        deny += [(n, "PERSON") for n in names]
+        p = Pseudonymizer(deny, redact_amounts=self.cfg.cloud.redact_amounts)
+        payload = (
+            prompts.load("cloud_refine").system
+            + "\n\n## Previous draft\n" + p.redact(previous)
+            + "\n\n## Owner's feedback\n" + (p.redact(comment) if comment else "(none)")
+            + "\n\n## Conversation summary\n" + (p.redact(ctx.summary) or "(none)")
+            + "\n\n## Message being answered\n" + p.redact(ctx.message[:1500])
+        )
+        store = self.store
+        with store.transaction():
+            call_id = store.add_cloud_call(
+                draft_id=draft_id, backend=b.name, model=b.model, payload=payload,
+                mapping=p.mapping, comment=comment,
+            )
+            store.log_event(
+                "cloud", "proposed", str(call_id),
+                {"backend": b.name, "draft_id": draft_id, "chars": len(payload)},
+            )
+        return CloudProposal(call_id, b.name, b.model, payload)
+
+    def _proposed_call(self, call_id: int) -> sqlite3.Row:
+        call = self.store.cloud_call(call_id)
+        if call is None:
+            raise ValueError(f"no cloud call {call_id}")
+        if call["status"] != "proposed":
+            raise ValueError(f"cloud call {call_id} is {call['status']}, not proposed")
+        return call
+
+    def send_cloud(self, call_id: int) -> int:
+        """Send the stored payload, byte for byte, and store the re-hydrated result as a version."""
+        call = self._proposed_call(call_id)
+        store = self.store
+        b = self.backend_factory(call["backend"])
+        try:
+            out = b.complete(call["payload"], CLOUD_SCHEMA)
+            if not (
+                isinstance(out, dict)
+                and isinstance(out.get("text"), str)
+                and isinstance(out.get("rationale"), str)
+            ):
+                raise CloudError("cloud backend returned no text")
+        except CloudError as e:
+            store.set_cloud_call_status(call_id, "failed", error=str(e))
+            store.log_event(
+                "cloud", "failed", str(call_id), {"backend": call["backend"], "error": str(e)}
+            )
+            raise
+        mapping = json.loads(call["mapping_json"] or "{}")
+        response = json.dumps(out, ensure_ascii=False)
+        text, unknown = Pseudonymizer.rehydrate(out["text"], mapping)
+        rationale, _ = Pseudonymizer.rehydrate(out["rationale"], mapping)
+        if unknown:
+            rationale += f" [unknown placeholders: {', '.join(unknown)}]"
+        draft_id = call["draft_id"]
+        with store.transaction():
+            store.set_cloud_call_status(
+                call_id, "sent", consented_at=self.now(), response=response,
+                response_hash=hashlib.sha256(response.encode()).hexdigest(),
+            )
+            vid = store.add_draft_version(
+                draft_id, round=store.next_round(draft_id), candidate=1,
+                origin=f"cloud:{call['backend']}", text=text, rationale=rationale,
+                comment=call["comment"], cloud_call_id=call_id,
+            )
+            store.log_event(
+                "cloud", "sent", str(call_id), {"version_id": vid, "unknown_placeholders": unknown}
+            )
+        return vid
+
+    def decline_cloud(self, call_id: int) -> None:
+        self._proposed_call(call_id)
+        with self.store.transaction():
+            self.store.set_cloud_call_status(call_id, "declined")
+            self.store.log_event("cloud", "declined", str(call_id), {})
