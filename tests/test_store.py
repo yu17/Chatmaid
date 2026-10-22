@@ -196,3 +196,42 @@ def test_transaction_commits_and_rolls_back(store):
             store.log_event("t", "lost", "r2", {})
             raise RuntimeError("x")
     assert [e["kind"] for e in store.events()] == ["ok"]
+
+
+def test_conversation_title_is_set_only_on_insert(store):
+    cid = store.upsert_conversation("email", "k1", "Plan B", "thread")
+    assert store.upsert_conversation("email", "k1", "Re: Plan B", "thread") == cid
+    assert store.conversation(cid)["title"] == "Plan B"
+    assert store.conversation_id_for_key("k1") == cid and store.conversation_id_for_key("nope") is None
+
+
+def test_merge_conversations(store, sample_message):
+    keep = store.upsert_conversation("email", "k-keep", "Keep", "thread")
+    drop = store.upsert_conversation("email", "k-drop", "Drop", "thread")
+    a = store.upsert_identity("email", "a@x.org", "A")
+    b = store.upsert_identity("email", "b@x.org", "B", is_owner=True)
+    ca, cb = store.contact_id_of(a), store.contact_id_of(b)
+    store.add_participant(keep, ca)
+    store.add_participant(drop, cb)
+    store.upsert_message(keep, sample_message, a)
+    other = dataclasses.replace(
+        sample_message, ref=dataclasses.replace(sample_message.ref, uid="8"), message_id="<m8@x.org>",
+        sent_at=1_700_000_500, is_owner=True,
+    )
+    store.upsert_message(drop, other, b)
+    store.set_conversation_summary(keep, "stale", events=[{"a": 1}])
+    store.upsert_embedding("conversation", drop, "h", [1.0, 0.0, 0.0, 0.0])
+    mem = store.add_memory(kind="fact", text="t", source_ref="r", observed_at=None, conversation_id=drop)
+    store.set_checkpoint("digest", str(drop), {"done": True})
+    with store.transaction():
+        assert store.merge_conversations(keep, drop) == 1
+    assert store.conversation(drop) is None and store.conversation_id_for_key("k-drop") is None
+    row = store.conversation(keep)
+    assert row["message_count"] == 2 and row["last_message_at"] == 1_700_000_500
+    assert row["last_owner_at"] == 1_700_000_500 and row["summary"] is None and row["events_json"] is None
+    assert {r["message_id"] for r in store.messages_for(keep)} == {"<m7@x.org>", "<m8@x.org>"}
+    assert store.participant_contact_ids(keep) == sorted([ca, cb])
+    assert store.memory(mem)["conversation_id"] == keep
+    assert store.get_checkpoint("digest", str(drop)) is None
+    assert store.embedding_hash("conversation", drop) is None and store.counts()["embeddings"] == 0
+    assert store.merge_conversations(keep, keep) == 0

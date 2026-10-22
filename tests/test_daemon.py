@@ -187,3 +187,36 @@ def test_raising_on_routed_callback_does_not_lose_state(watch_env):
     assert watch_env.watcher.handle_trigger("timer") == 1
     assert watch_env.store.get_checkpoint("watch", "evolution")["a1/INBOX"] == 7
     assert watch_env.watcher.handle_trigger("timer") == 0
+
+
+def test_unexpected_error_in_scan_does_not_kill_the_trigger(watch_env, monkeypatch):
+    watch_env.watcher.handle_trigger("timer")
+    before = watch_env.store.get_checkpoint("watch", "evolution")
+
+    def boom(state, *, baseline_missing=False):
+        raise RuntimeError("stray uid")
+
+    monkeypatch.setattr(watch_env.connector, "scan_new", boom)
+    assert watch_env.watcher.handle_trigger("timer") == 0
+    assert watch_env.store.get_checkpoint("watch", "evolution") == before
+
+
+def test_malformed_checkpoint_does_not_kill_the_trigger(watch_env):
+    watch_env.store.set_checkpoint("watch", "evolution", {"a1/INBOX": "not a number"})
+    assert watch_env.watcher.handle_trigger("timer") == 0
+    assert watch_env.store.get_checkpoint("watch", "evolution") == {"a1/INBOX": "not a number"}
+
+
+def test_watcher_merges_conversations_joined_by_a_new_message(watch_env):
+    watch_env.watcher.handle_trigger("timer")
+    watch_env.add_row("INBOX", uid="7", message_id="<t1@x>", date=1_700_000_500, body="one", **ANN)
+    watch_env.add_row("INBOX", uid="8", message_id="<t2@x>", date=1_700_000_501, body="two", **ANN)
+    assert watch_env.watcher.handle_trigger("timer") == 2
+    store = watch_env.store
+    keep = store.conversation_id_for_key("email:a1:<t1@x>")
+    drop = store.conversation_id_for_key("email:a1:<t2@x>")
+    assert keep is not None and drop is not None
+    watch_env.add_row("INBOX", uid="9", message_id="<t3@x>", date=1_700_000_502, body="both", references=("<t1@x>", "<t2@x>"), **ANN)
+    assert watch_env.watcher.handle_trigger("timer") == 1
+    assert store.conversation(drop) is None and store.conversation(keep)["message_count"] == 3
+    assert watch_env.watcher.handle_trigger("timer") == 0

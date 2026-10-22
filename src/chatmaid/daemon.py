@@ -41,7 +41,11 @@ class Watcher:
         account = msg.ref.account
         if account not in self._indexes:
             self._indexes[account] = build_thread_index(self.store, "email", account)
-        cid = store_message(self.store, self._indexes[account], self.connector, msg)
+        try:
+            cid = store_message(self.store, self._indexes[account], self.connector, msg)
+        except BaseException:
+            self._indexes.pop(account, None)  # the writes roll back; the index may have diverged
+            raise
         self.store.log_event(
             "evolution", kind, msg.ref.key(),
             {"bulk": msg.bulk, "conversation_id": cid, "subject": msg.subject},
@@ -66,12 +70,16 @@ class Watcher:
     def handle_trigger(self, kind: str) -> int:
         """Scan for new messages and route them; returns how many were routed.
 
-        A locked or failing database aborts the trigger with the saved state untouched.
+        Any failure (a locked database, a malformed checkpoint, an unexpected error out of the
+        connector) aborts the trigger with the saved state untouched; the loop keeps running.
         """
         try:
             return self._handle(kind)
         except sqlite3.Error as e:
             log.warning("trigger %r skipped: %s", kind, e)
+            return 0
+        except Exception:
+            log.exception("trigger %r failed", kind)
             return 0
 
     def _handle(self, kind: str) -> int:

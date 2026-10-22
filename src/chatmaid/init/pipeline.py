@@ -3,6 +3,7 @@
 import json
 import logging
 import sqlite3
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -14,11 +15,12 @@ from chatmaid.llm import prompts
 from chatmaid.llm.base import LLM, LLMError
 from chatmaid.model import NormalizedMessage
 from chatmaid.store import Store
-from chatmaid.threads import ThreadIndex, normalize_subject, thread_fallback_key
+from chatmaid.threads import ThreadIndex, strip_subject_prefixes, thread_fallback_key
 
 log = logging.getLogger(__name__)
 
 LOCAL_ACCOUNT = "local"  # Maildir uids are not integers: never checkpointed
+INGEST_BATCH = 200  # messages per store transaction
 DIGEST_MAX_TOKENS = 2048
 _RETRY_NOTE = "Your reply was not valid JSON matching the schema; reply with the JSON object only."
 
@@ -59,23 +61,49 @@ def conversation_key(index: ThreadIndex, msg: NormalizedMessage) -> str:
 
 
 def store_message(store: Store, index: ThreadIndex, connector: Connector, msg: NormalizedMessage) -> int:
-    """Upsert identities, the conversation, participants and the message; return the conversation id."""
+    """Upsert identities, the conversation, participants and the message; return the conversation id.
+
+    A message that links threads already stored as separate conversations folds the newer
+    ones into the oldest (ruling R17). Callers run this inside `store.transaction()` and must
+    rebuild `index` from the store when it raises: the index is updated before the writes.
+    """
     owner = getattr(connector, "owner", None)
 
     def identity(addr, fallback: bool) -> int:
         is_owner = owner.matches(addr) if owner is not None else fallback
         return store.upsert_identity("email", addr.email, addr.name or None, is_owner=is_owner)
 
+    ids = ([msg.message_id] if msg.message_id else []) + list(_refs(msg))
+    linked_before = index.keys_of(ids)
     index.add(msg.message_id, _refs(msg))
     sender_id = identity(msg.sender, msg.is_owner)
     contact_ids = {store.contact_id_of(sender_id)}
     contact_ids.update(store.contact_id_of(identity(a, False)) for a in msg.recipients)
-    title = normalize_subject(msg.subject) or msg.subject or "(no subject)"
-    cid = store.upsert_conversation("email", conversation_key(index, msg), title, "thread")
+    key = conversation_key(index, msg)
+    title = strip_subject_prefixes(msg.subject) or msg.subject or "(no subject)"
+    cid = store.upsert_conversation("email", key, title, "thread")
+    for old in linked_before:
+        old_key = f"email:{msg.ref.account}:{old}"
+        drop = store.conversation_id_for_key(old_key) if old_key != key else None
+        if drop is not None and drop != cid:
+            moved = store.merge_conversations(cid, drop)
+            log.info("merged conversation %s into %s (%s messages)", drop, cid, moved)
     for contact_id in contact_ids:
         store.add_participant(cid, contact_id)
     store.upsert_message(cid, msg, sender_id)
     return cid
+
+
+def _batches(msgs: Iterable[NormalizedMessage], size: int) -> Iterator[list[NormalizedMessage]]:
+    """Consecutive messages of one folder, at most `size` per batch."""
+    batch: list[NormalizedMessage] = []
+    for msg in msgs:
+        if batch and (len(batch) >= size or _folder_key(msg) != _folder_key(batch[0])):
+            yield batch
+            batch = []
+        batch.append(msg)
+    if batch:
+        yield batch
 
 
 @dataclass(frozen=True)
@@ -197,34 +225,36 @@ class InitPipeline:
         }
         indexes: dict[str, ThreadIndex] = {}
         touched: set[int] = set()
-        top: dict[str, int] = {}  # folder key -> max integer uid seen this run
+        top: dict[str, int] = {}  # folder key -> watermark over every row read this run
         failed: set[str] = set()
         seen = skipped = 0
-        current: str | None = None
 
-        for msg in self.connector.iter_messages(since=opts.since, after=after):
-            folder = _folder_key(msg)
-            if current is not None and folder != current:
-                self._save_checkpoint(current, top, failed, opts.since)
-            current = folder
-            seen += 1
-            account = msg.ref.account
-            if msg.message_id and store.has_message_id("email", account, msg.message_id):
-                skipped += 1
-            else:
-                if account not in indexes:
-                    indexes[account] = build_thread_index(store, "email", account)
-                try:
-                    touched.add(store_message(store, indexes[account], self.connector, msg))
-                except (sqlite3.OperationalError, LLMError) as e:
-                    log.warning("ingest failed for %s: %s", msg.ref.key(), e)
-                    failed.add(folder)
-                    continue
-            mark = self._watermark(msg)
-            if mark is not None:
-                top[folder] = max(top.get(folder, 0), mark)
-        if current is not None:
-            self._save_checkpoint(current, top, failed, opts.since)
+        # The date filter is applied here rather than in the connector so the watermark also
+        # covers the rows `since` excludes: they must not come back as "new" to the watcher.
+        messages = self.connector.iter_messages(after=after)
+        for batch in _batches(messages, INGEST_BATCH):
+            folder = _folder_key(batch[0])
+            account = batch[0].ref.account
+            try:
+                with store.transaction():
+                    for msg in batch:
+                        mark = self._watermark(msg)
+                        if mark is not None:
+                            top[folder] = max(top.get(folder, 0), mark)
+                        if opts.since is not None and msg.sent_at < opts.since:
+                            continue
+                        seen += 1
+                        if msg.message_id and store.has_message_id("email", account, msg.message_id):
+                            skipped += 1
+                            continue
+                        if account not in indexes:
+                            indexes[account] = build_thread_index(store, "email", account)
+                        touched.add(store_message(store, indexes[account], self.connector, msg))
+                    self._save_checkpoint(folder, top, failed, opts.since)
+            except (sqlite3.OperationalError, LLMError) as e:
+                log.warning("ingest of %s failed, batch rolled back: %s", folder, e)
+                failed.add(folder)
+                indexes.pop(account, None)  # may hold links of the rolled-back messages
 
         counts = store.counts()
         return IngestStats(
@@ -339,12 +369,14 @@ class InitPipeline:
                 new_summary = merged["summary"]
             summary = new_summary
             events.extend(out["events"])
-            memories += self._add_memories(out, chunk[0].ref.key(), cid, contact_id)
-            store.set_checkpoint(
-                "digest", str(cid), {"chunk": i, "summary": summary, "events": events}
-            )
-        store.set_conversation_summary(cid, summary, events=events)
-        store.set_checkpoint("digest", str(cid), {"done": True})
+            with store.transaction():  # a chunk's memories and its checkpoint land together
+                memories += self._add_memories(out, chunk[0].ref.key(), cid, contact_id)
+                store.set_checkpoint(
+                    "digest", str(cid), {"chunk": i, "summary": summary, "events": events}
+                )
+        with store.transaction():
+            store.set_conversation_summary(cid, summary, events=events)
+            store.set_checkpoint("digest", str(cid), {"done": True})
         return len(chunks) - start, memories
 
     def _add_memories(self, out: dict, source_ref: str, cid: int, contact_id: int | None) -> int:

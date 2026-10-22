@@ -104,12 +104,64 @@ class Store:
     # --- conversations ---
 
     def upsert_conversation(self, platform: str, key: str, title: str, kind: str) -> int:
+        """Create the conversation or return the existing one; the title is set only on insert."""
         self._conn.execute(
             "INSERT INTO conversation (platform, key, title, kind) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET title = excluded.title, kind = excluded.kind",
+            "ON CONFLICT(key) DO UPDATE SET kind = excluded.kind",
             (platform, key, title, kind),
         )
         return self._conn.execute("SELECT id FROM conversation WHERE key = ?", (key,)).fetchone()["id"]
+
+    def conversation_id_for_key(self, key: str) -> int | None:
+        row = self._conn.execute("SELECT id FROM conversation WHERE key = ?", (key,)).fetchone()
+        return None if row is None else row["id"]
+
+    def merge_conversations(self, keep_id: int, drop_id: int) -> int:
+        """Fold `drop_id` into `keep_id` (ruling R17) and return how many messages moved.
+
+        Messages, participants and memories are re-pointed, the counters of `keep_id` are
+        refreshed and `drop_id` is deleted together with its digest state and embedding. The
+        kept summary no longer describes the conversation, so it (and its digest state) is
+        cleared for the next digest pass to rewrite. Call inside `transaction()`.
+        """
+        if keep_id == drop_id:
+            return 0
+        c = self._conn
+        moved = c.execute(
+            "UPDATE message SET conversation_id = ? WHERE conversation_id = ?", (keep_id, drop_id)
+        ).rowcount
+        c.execute(
+            "INSERT OR IGNORE INTO conversation_participant (conversation_id, contact_id) "
+            "SELECT ?, contact_id FROM conversation_participant WHERE conversation_id = ?",
+            (keep_id, drop_id),
+        )
+        c.execute("DELETE FROM conversation_participant WHERE conversation_id = ?", (drop_id,))
+        c.execute(
+            "UPDATE memory SET conversation_id = ? WHERE conversation_id = ?", (keep_id, drop_id)
+        )
+        for cid in (keep_id, drop_id):
+            c.execute("DELETE FROM checkpoint WHERE task = 'digest' AND key = ?", (str(cid),))
+            self._delete_embedding("conversation", cid)
+        c.execute("DELETE FROM conversation WHERE id = ?", (drop_id,))
+        c.execute(
+            "UPDATE conversation SET summary = NULL, summary_updated_at = NULL, events_json = NULL "
+            "WHERE id = ?",
+            (keep_id,),
+        )
+        self._refresh_conversation(keep_id)
+        return moved
+
+    def _refresh_conversation(self, conversation_id: int) -> None:
+        self._conn.execute(
+            "UPDATE conversation SET "
+            "message_count = (SELECT COUNT(*) FROM message WHERE conversation_id = ?), "
+            "bulk = COALESCE((SELECT MIN(bulk) FROM message WHERE conversation_id = ?), 0), "
+            "last_message_at = (SELECT MAX(sent_at) FROM message WHERE conversation_id = ?), "
+            "last_owner_at = (SELECT MAX(sent_at) FROM message "
+            "WHERE conversation_id = ? AND is_owner = 1) "
+            "WHERE id = ?",
+            (conversation_id,) * 5,
+        )
 
     def set_conversation_summary(
         self,
@@ -358,10 +410,14 @@ class Store:
 
     def message_ids_for_account(
         self, platform: str, account: str
-    ) -> list[tuple[str, tuple[str, ...]]]:
+    ) -> list[tuple[str | None, tuple[str, ...]]]:
+        """(message_id, references) of every message that can link threads, in insertion order.
+
+        Replaying them into a `ThreadIndex` in this order reproduces the keys ingest assigned.
+        """
         rows = self._conn.execute(
-            "SELECT message_id, references_json FROM message "
-            "WHERE platform = ? AND account = ? AND message_id IS NOT NULL ORDER BY id",
+            "SELECT message_id, references_json FROM message WHERE platform = ? AND account = ? "
+            "AND (message_id IS NOT NULL OR COALESCE(references_json, '[]') != '[]') ORDER BY id",
             (platform, account),
         ).fetchall()
         return [(r["message_id"], tuple(json.loads(r["references_json"] or "[]"))) for r in rows]
@@ -457,6 +513,14 @@ class Store:
         except BaseException:
             self._conn.execute("ROLLBACK")
             raise
+
+    def _delete_embedding(self, kind: str, ref_id: int) -> None:
+        row = self._conn.execute(
+            "SELECT id FROM embedding_item WHERE kind = ? AND ref_id = ?", (kind, ref_id)
+        ).fetchone()
+        if row:
+            self._conn.execute("DELETE FROM vec_embedding WHERE item_id = ?", (row["id"],))
+            self._conn.execute("DELETE FROM embedding_item WHERE id = ?", (row["id"],))
 
     def embedding_hash(self, kind: str, ref_id: int) -> str | None:
         row = self._conn.execute(

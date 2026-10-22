@@ -1,4 +1,7 @@
 import json
+import sqlite3
+
+import pytest
 
 from chatmaid.init.pipeline import InitOptions, InitPipeline
 from chatmaid.llm.fake import FakeLLM
@@ -110,3 +113,24 @@ def test_digest_untracks_conversation_without_fetchable_messages(ingested_env, m
     assert store.conversations(needing_summary=True) == []
     second = pipeline(ingested_env, FakeLLM(PLAIN)).digest(InitOptions())
     assert second.failed == 0 and second.conversations == 0
+
+
+def test_chunk_memories_and_checkpoint_are_written_atomically(ingested_env, monkeypatch):
+    store = ingested_env.store
+    real = store.set_checkpoint
+
+    def locked(task, key, state):
+        if task == "digest" and "chunk" in state:
+            raise sqlite3.OperationalError("database is locked")
+        return real(task, key, state)
+
+    monkeypatch.setattr(store, "set_checkpoint", locked)
+    llm = FakeLLM(
+        {
+            "chunk_summary": '{"summary":"S1","events":[],"facts":[{"about":"Ann","text":"likes tea"}]}',
+            "rolling_summary": '{"summary":"S"}',
+        }
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        pipeline(ingested_env, llm).digest(InitOptions(limit_conversations=1))
+    assert store.counts()["memories"] == 0
