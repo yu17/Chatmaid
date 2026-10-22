@@ -13,8 +13,9 @@ def test_folders_and_rows(tmp_path):
         [inbox] = c.folders()
         assert inbox.name == "INBOX" and inbox.saved_count == 2
         assert [r.uid for r in c.iter_rows(inbox)] == ["1", "2"]
-        assert [r.uid for r in c.iter_rows(inbox, after_uid=1)] == ["2"]
-        assert c.max_uid(inbox) == 2
+        assert [r.uid for r in c.iter_rows(inbox, after=1)] == ["2"]
+        assert c.uid_mode(inbox) == "int"
+        assert c.watermark(inbox, c.iter_rows(inbox)) == 2
     finally:
         c.close()
 
@@ -30,12 +31,13 @@ def test_body_path_and_missing(tmp_path):
         c.close()
 
 
-def test_max_uid_empty_folder(tmp_path):
+def test_watermark_empty_folder(tmp_path):
     cache_dir = make_cache(tmp_path, "a1", {"INBOX": []})
     c = EvolutionCache(cache_dir, "a1")
     try:
         [inbox] = c.folders()
-        assert c.max_uid(inbox) is None
+        assert c.uid_mode(inbox) == "int"
+        assert c.watermark(inbox, c.iter_rows(inbox)) is None
     finally:
         c.close()
 
@@ -65,5 +67,24 @@ def test_row_lookup(tmp_path):
         [inbox] = c.folders()
         assert c.row(inbox, "2").subject == "s2"
         assert c.row(inbox, "7") is None
+    finally:
+        c.close()
+
+
+def test_time_mode_folder(tmp_path):
+    rows = [
+        dict(uid="AQ2", dreceived=200),
+        dict(uid="AQ1", dreceived=100),
+        dict(uid="AQ3", dreceived=200),
+    ]
+    cache_dir = make_cache(tmp_path, "a1", {"X": rows})
+    c = EvolutionCache(cache_dir, "a1")
+    try:
+        [x] = c.folders()
+        assert c.uid_mode(x) == "time"
+        assert [r.uid for r in c.iter_rows(x)] == ["AQ1", "AQ2", "AQ3"]
+        assert [r.uid for r in c.iter_rows(x, after=200)] == ["AQ2", "AQ3"]
+        assert c.watermark(x, c.iter_rows(x)) == 200
+        assert c.watermark(x, c.iter_rows(x, after=999)) is None
     finally:
         c.close()

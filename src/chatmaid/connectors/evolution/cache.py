@@ -1,11 +1,14 @@
 """Read-only access to Evolution's CamelStoreDB cache (folders.db plus body files)."""
 
 import sqlite3
-from collections.abc import Iterator
+import re
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 _BATCH = 500
+_NUMERIC = re.compile(r"^\d+$")
 
 
 @dataclass(frozen=True)
@@ -73,16 +76,23 @@ class EvolutionCache:
         ).fetchall()
         return [FolderInfo(r["folder_id"], r["folder_name"], r["saved_count"] or 0) for r in rows]
 
-    def iter_rows(self, folder: FolderInfo, *, after_uid: int | None = None) -> Iterator[MessageRow]:
+    def uid_mode(self, folder: FolderInfo) -> Literal["int", "time"]:
+        """"int" when uids are numeric (or the folder is empty), else "time" (opaque uids)."""
+        row = self._conn.execute(f"SELECT uid FROM messages_{int(folder.folder_id)} LIMIT 1").fetchone()
+        return "time" if row is not None and not _NUMERIC.match(str(row[0])) else "int"
+
+    def iter_rows(self, folder: FolderInfo, *, after: int | None = None) -> Iterator[MessageRow]:
+        """Rows past the watermark: uid > after (int mode) or dreceived >= after (time mode)."""
         sql = (
             "SELECT uid, flags, dsent, dreceived, subject, mail_from, mail_to, mail_cc, size"
             f" FROM messages_{int(folder.folder_id)}"
         )
+        time_mode = self.uid_mode(folder) == "time"
         params: tuple = ()
-        if after_uid is not None:
-            sql += " WHERE CAST(uid AS INTEGER) > ?"
-            params = (after_uid,)
-        sql += " ORDER BY CAST(uid AS INTEGER)"
+        if after is not None:
+            sql += " WHERE dreceived >= ?" if time_mode else " WHERE CAST(uid AS INTEGER) > ?"
+            params = (after,)
+        sql += " ORDER BY dreceived, uid" if time_mode else " ORDER BY CAST(uid AS INTEGER)"
         cur = self._conn.execute(sql, params)
         try:
             while batch := cur.fetchmany(_BATCH):
@@ -99,11 +109,13 @@ class EvolutionCache:
         ).fetchone()
         return None if r is None else _to_row(r)
 
-    def max_uid(self, folder: FolderInfo) -> int | None:
-        row = self._conn.execute(
-            f"SELECT MAX(CAST(uid AS INTEGER)) FROM messages_{int(folder.folder_id)}"
-        ).fetchone()
-        return row[0]
+    def watermark(self, folder: FolderInfo, rows: Iterable[MessageRow]) -> int | None:
+        """Max uid (int mode) or max dreceived (time mode) over the rows read; None if no rows."""
+        if self.uid_mode(folder) == "time":
+            values = [r.dreceived for r in rows]
+        else:
+            values = [int(r.uid) for r in rows]
+        return max(values) if values else None
 
     def folder_dir(self, name: str) -> Path:
         return self._root / "folders" / name.replace("/", "/subfolders/")

@@ -51,6 +51,7 @@ class EvolutionConnector:
         self._accounts = list(accounts)
         self._owner = owner
         self._caches: dict[str, EvolutionCache] = {}
+        self._folder_modes: dict[tuple[str, str], tuple[FolderInfo, str] | None] = {}
 
     @property
     def owner(self) -> OwnerIdentity:
@@ -70,6 +71,7 @@ class EvolutionConnector:
         for c in self._caches.values():
             c.close()
         self._caches.clear()
+        self._folder_modes.clear()
 
     def _folders(self, account: EvolutionAccount) -> list[FolderInfo]:
         return _order_folders(
@@ -133,7 +135,7 @@ class EvolutionConnector:
             seen: set[str] = set()
             for folder in self._folders(account):
                 try:
-                    for row in cache.iter_rows(folder, after_uid=after.get(f"{account.uid}/{folder.name}")):
+                    for row in cache.iter_rows(folder, after=after.get(f"{account.uid}/{folder.name}")):
                         msg = self._from_row(account, cache, folder, row)
                         if msg.message_id is not None:
                             if msg.message_id in seen:
@@ -185,6 +187,27 @@ class EvolutionConnector:
             raise KeyError(ref.key())
         return self._from_row(account, cache, folder, row)
 
+    def watermark_for(self, ref: SourceRef) -> int | None:
+        """Checkpoint value of one message: int uid, or the row's dreceived in time mode.
+
+        None for the local Maildir (never checkpointed) or an unknown ref.
+        """
+        if ref.account == LOCAL_ACCOUNT:
+            return None
+        cache = self._cache(ref.account)
+        key = (ref.account, ref.folder)
+        if key not in self._folder_modes:
+            folder = next((f for f in cache.folders() if f.name == ref.folder), None)
+            self._folder_modes[key] = None if folder is None else (folder, cache.uid_mode(folder))
+        entry = self._folder_modes[key]
+        if entry is None:
+            return None
+        folder, mode = entry
+        if mode == "int":
+            return int(ref.uid)
+        row = cache.row(folder, ref.uid)
+        return None if row is None else row.dreceived
+
     def scan_new(self, state: dict[str, int]) -> tuple[list[SourceRef], dict[str, int]]:
         new_state = dict(state)
         refs: list[SourceRef] = []
@@ -193,8 +216,8 @@ class EvolutionConnector:
             for folder in self._folders(account):
                 key = f"{account.uid}/{folder.name}"
                 try:
-                    rows = list(cache.iter_rows(folder, after_uid=state.get(key)))
-                    top = cache.max_uid(folder)
+                    rows = list(cache.iter_rows(folder, after=state.get(key)))
+                    top = cache.watermark(folder, rows)
                 except sqlite3.OperationalError as e:
                     log.warning("skipping %s: %s", key, e)
                     continue

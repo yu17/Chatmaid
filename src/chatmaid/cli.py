@@ -110,6 +110,8 @@ def _init_command(args: argparse.Namespace) -> int:
     opts = InitOptions(since=args.since, limit_conversations=args.limit, passes=passes)
     store = _open_store(cfg)
     try:
+        if args.reset_checkpoints:
+            print(f"cleared {store.clear_checkpoints('ingest')} ingest checkpoints")
         for name, stats in InitPipeline(store, connector, llm, cfg).run(opts).items():
             print(f"{name}: {stats}")
     finally:
@@ -125,6 +127,7 @@ def register_init(subparsers) -> None:
     p.add_argument(
         "--pass", dest="pass_name", choices=["ingest", "digest", "style", "embed", "all"], default="all"
     )
+    p.add_argument("--reset-checkpoints", action="store_true", help="forget ingest checkpoints first")
     p.add_argument("--fake-llm", action="store_true", help="use the canned FakeLLM")
     p.set_defaults(handler=_init_command)
 

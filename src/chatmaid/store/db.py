@@ -315,6 +315,9 @@ class Store:
         ).fetchall()
         return {r["key"]: json.loads(r["state_json"]) for r in rows}
 
+    def clear_checkpoints(self, task: str) -> int:
+        return self._conn.execute("DELETE FROM checkpoint WHERE task = ?", (task,)).rowcount
+
     # --- embeddings ---
 
     def upsert_embedding(self, kind: str, ref_id: int, text_hash: str, vector: list[float]) -> None:

@@ -3,6 +3,7 @@ import logging
 import sqlite3
 
 import pytest
+from conftest import add_time_folder
 
 from chatmaid.connectors.evolution.connector import EvolutionConnector
 from chatmaid.model import SourceRef
@@ -94,3 +95,16 @@ def test_iter_messages_after_skips_checkpointed_uids(fake_env):
     msgs = fake_env.connector.iter_messages(after={"a1/INBOX": 1})
     inbox = [m.ref.uid for m in msgs if m.ref.folder == "INBOX"]
     assert inbox == ["2"]
+
+
+def test_scan_new_time_mode_folder(fake_env):
+    add_time_folder(fake_env.db_path, "Exch", [("AQ1", 1_700_000_500), ("AQ2", 1_700_000_600)])
+    refs, state = fake_env.connector.scan_new({})
+    assert state["a1/Exch"] == 1_700_000_600
+    assert {r.uid for r in refs if r.folder == "Exch"} == {"AQ1", "AQ2"}
+    add_time_folder(fake_env.db_path, "Exch", [("AQ3", 1_700_000_700)])
+    refs2, state2 = fake_env.connector.scan_new(state)
+    assert sorted(r.uid for r in refs2) == ["AQ2", "AQ3"]  # inclusive boundary row
+    assert state2["a1/Exch"] == 1_700_000_700
+    refs3, state3 = fake_env.connector.scan_new(state2)
+    assert [r.uid for r in refs3] == ["AQ3"] and state3 == state2

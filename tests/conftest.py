@@ -127,6 +127,39 @@ def make_cache(tmp_path, account_uid, folders):
     return tmp_path
 
 
+def add_time_folder(db_path, name, rows):
+    """Add (or extend) a folder with opaque uids; rows are (uid, dreceived) with dsent = dreceived."""
+    conn = sqlite3.connect(db_path)
+    try:
+        found = conn.execute("SELECT folder_id FROM folders WHERE folder_name = ?", (name,)).fetchone()
+        if found:
+            fid = found[0]
+        else:
+            fid = conn.execute("SELECT MAX(folder_id) FROM folders").fetchone()[0] + 1
+            conn.execute(
+                "INSERT INTO folders (folder_name, version, flags, nextuid, time, saved_count,"
+                " unread_count, deleted_count, junk_count, visible_count, jnd_count, bdata, folder_id)"
+                " VALUES (?, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, '', ?)",
+                (name, fid),
+            )
+            conn.execute(
+                f"CREATE TABLE messages_{fid} (uid TEXT, flags INTEGER, msg_type INTEGER,"
+                " dirty INTEGER, size INTEGER, dsent NUMERIC, dreceived NUMERIC, subject TEXT,"
+                " mail_from TEXT, mail_to TEXT, mail_cc TEXT, mlist TEXT, part TEXT, labels TEXT,"
+                " usertags TEXT, cinfo TEXT, bdata TEXT, userheaders TEXT, preview TEXT,"
+                " PRIMARY KEY (uid))"
+            )
+        for uid, received in rows:
+            conn.execute(
+                f"INSERT INTO messages_{fid} (uid, flags, msg_type, dirty, size, dsent, dreceived,"
+                " subject, mail_from, mail_to, mail_cc) VALUES (?, 0, 0, 0, 0, ?, ?, ?, ?, ?, '')",
+                (uid, received, received, f"subj {uid}", "Zed <zed@x.org>", "me@x.org"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _mail(msg_id, frm, to, date, body, extra=""):
     when = format_datetime(datetime.fromtimestamp(date, timezone.utc))
     return (

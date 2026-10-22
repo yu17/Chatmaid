@@ -51,6 +51,12 @@ def conversation_key(index: ThreadIndex, msg: NormalizedMessage) -> str:
     return f"email:{msg.ref.account}:{index.key_for(msg.message_id, _refs(msg), fallback)}"
 
 
+def _usable(state: dict, since: int | None) -> bool:
+    """A checkpoint written under a later `since` would hide older rows from this run."""
+    stored = state.get("since")
+    return stored is None or (since is not None and since >= stored)
+
+
 def _folder_key(msg: NormalizedMessage) -> str:
     return f"{msg.ref.account}/{msg.ref.folder}"
 
@@ -74,7 +80,11 @@ class InitPipeline:
     def ingest(self, opts: InitOptions) -> IngestStats:
         store = self.store
         before = store.counts()["messages"]
-        after = {k: int(v["last_uid"]) for k, v in store.checkpoints("ingest").items()}
+        after = {
+            k: int(v["last_uid"])
+            for k, v in store.checkpoints("ingest").items()
+            if _usable(v, opts.since)
+        }
         indexes: dict[str, ThreadIndex] = {}
         touched: set[int] = set()
         top: dict[str, int] = {}  # folder key -> max integer uid seen this run
@@ -85,7 +95,7 @@ class InitPipeline:
         for msg in self.connector.iter_messages(since=opts.since, after=after):
             folder = _folder_key(msg)
             if current is not None and folder != current:
-                self._save_checkpoint(current, top, failed)
+                self._save_checkpoint(current, top, failed, opts.since)
             current = folder
             seen += 1
             account = msg.ref.account
@@ -100,10 +110,11 @@ class InitPipeline:
                     log.warning("ingest failed for %s: %s", msg.ref.key(), e)
                     failed.add(folder)
                     continue
-            if account != LOCAL_ACCOUNT and msg.ref.uid.isdigit():
-                top[folder] = max(top.get(folder, 0), int(msg.ref.uid))
+            mark = self._watermark(msg)
+            if mark is not None:
+                top[folder] = max(top.get(folder, 0), mark)
         if current is not None:
-            self._save_checkpoint(current, top, failed)
+            self._save_checkpoint(current, top, failed, opts.since)
 
         counts = store.counts()
         return IngestStats(
@@ -114,9 +125,19 @@ class InitPipeline:
             skipped_dup=skipped,
         )
 
-    def _save_checkpoint(self, folder: str, top: dict[str, int], failed: set[str]) -> None:
+    def _watermark(self, msg: NormalizedMessage) -> int | None:
+        if msg.ref.account == LOCAL_ACCOUNT:
+            return None
+        fn = getattr(self.connector, "watermark_for", None)
+        return fn(msg.ref) if fn is not None else None
+
+    def _save_checkpoint(
+        self, folder: str, top: dict[str, int], failed: set[str], since: int | None
+    ) -> None:
         if folder in top and folder not in failed:
-            self.store.set_checkpoint("ingest", folder, {"last_uid": top[folder]})
+            # "last_uid" holds the folder watermark: max int uid, or max dreceived for opaque uids.
+            state = {"last_uid": top[folder], "since": since}
+            self.store.set_checkpoint("ingest", folder, state)
 
     def _store_message(self, index: ThreadIndex, msg: NormalizedMessage) -> int:
         store = self.store

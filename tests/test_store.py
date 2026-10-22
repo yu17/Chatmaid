@@ -104,3 +104,12 @@ def test_conversation_bulk_follows_messages(store, sample_message):
     )
     store.upsert_message(cid, other, sid)
     assert store.conversations()[0]["bulk"] == 0
+
+
+def test_clear_checkpoints(store):
+    store.set_checkpoint("ingest", "a", {"last_uid": 1})
+    store.set_checkpoint("ingest", "b", {"last_uid": 2})
+    store.set_checkpoint("other", "a", {"x": 1})
+    assert store.clear_checkpoints("ingest") == 2
+    assert store.checkpoints("ingest") == {}
+    assert store.get_checkpoint("other", "a") == {"x": 1}
