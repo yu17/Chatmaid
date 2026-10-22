@@ -1,0 +1,31 @@
+[data]
+dir = "data"
+hot_window_days = 365
+
+[owner]
+name = "Jiaqi"
+aliases = ["jiaqi", "fishy"]
+extra_addresses = []
+
+[email]
+evolution_config_dir = "~/.config/evolution/sources"
+evolution_cache_dir = "~/.cache/evolution/mail"
+accounts = [
+  "2bb8bc493ea9a64e270c733fd29ed16b853eefcb",  # b5a7v1
+  "8a19039da6e94f226343e4c2ad4bf97d031a7f8e",  # jiaqi.yu1
+  "f71772b19449d2cd7282d5176e2f4178935719e7",  # jxy618.case
+  "19f397267c6bc963a9feca8074db17099796fbfd",  # yjq17
+  "5cf1ac3f38477a31b4698179ffc7c571355c57af",  # yu17.fishy
+]
+skip_folders = ["[Gmail]/All Mail", "[Gmail]/Important", "[Gmail]/Starred"]
+local_maildir_sent = "~/.local/share/evolution/mail/local/.Sent"
+
+[lmstudio]
+base_url = "http://127.0.0.1:40090/v1"
+token_file = "LMStudio_token.txt"
+model_small = "qwen/qwen3-4b-2507"
+model_main = "qwen/qwen3.5-35b-a3b"
+model_heavy = "qwen/qwen3.5-35b-a3b"
+model_embedding = "text-embedding-qwen3-embedding-0.6b"
+embedding_dim = 1024
+timeout_s = 600
