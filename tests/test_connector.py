@@ -113,3 +113,14 @@ def test_scan_new_time_mode_folder(fake_env):
 def test_scan_new_baseline_missing_records_watermark_without_refs(fake_env):
     refs, state = fake_env.connector.scan_new({}, baseline_missing=True)
     assert refs == [] and state == fake_env.connector.scan_new({})[1]
+
+
+def test_scan_new_baseline_of_time_mode_folder_excludes_newest_row(fake_env):
+    base = fake_env.connector.scan_new({}, baseline_missing=True)[1]
+    state = {k: v for k, v in base.items() if k != "a1/Exch"}
+    add_time_folder(fake_env.db_path, "Exch", [("AQ1", 1_700_000_500), ("AQ2", 1_700_000_600)])
+    refs, state = fake_env.connector.scan_new(state, baseline_missing=True)
+    assert refs == [] and state["a1/Exch"] == 1_700_000_601
+    add_time_folder(fake_env.db_path, "Exch", [("AQ3", 1_700_000_700)])
+    refs, state = fake_env.connector.scan_new(state, baseline_missing=True)
+    assert [r.uid for r in refs] == ["AQ3"]

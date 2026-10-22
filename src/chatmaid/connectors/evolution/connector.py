@@ -229,7 +229,13 @@ class EvolutionConnector:
                     log.warning("skipping %s: %s", key, e)
                     continue
                 if baseline_missing and key not in state:
-                    new_state[key] = top if top is not None else 0
+                    # Time-mode reads are inclusive (dreceived >= after): step past the newest
+                    # existing row so it is not returned as new. Accepted limitation: a message
+                    # written later with dreceived at or below this boundary is not routed live.
+                    if top is None:
+                        new_state[key] = 0
+                    else:
+                        new_state[key] = top + 1 if cache.uid_mode(folder) == "time" else top
                     continue
                 refs.extend(SourceRef("evolution", account.uid, folder.name, r.uid) for r in rows)
                 if top is not None:

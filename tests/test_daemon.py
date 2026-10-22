@@ -163,3 +163,27 @@ def test_log_event_failure_rolls_back_message_and_keeps_state(watch_env, monkeyp
     assert watch_env.store.get_checkpoint("watch", "evolution") == before
     monkeypatch.setattr(watch_env.store, "log_event", real)
     assert watch_env.watcher.handle_trigger("timer") == 1
+
+
+def test_time_mode_folder_appearing_later_is_baselined(watch_env):
+    watch_env.watcher.handle_trigger("timer")
+    watch_env.add_folder("Exchange Later")
+    watch_env.add_row("Exchange Later", uid="AQ1", message_id="<x1@x>", date=1_700_000_501, body="one", **ANN)
+    watch_env.add_row("Exchange Later", uid="AQ2", message_id="<x2@x>", date=1_700_000_502, body="two", **ANN)
+    assert watch_env.watcher.handle_trigger("timer") == 0
+    watch_env.add_row("Exchange Later", uid="AQ3", message_id="<x3@x>", date=1_700_000_600, body="three", **ANN)
+    assert watch_env.watcher.handle_trigger("timer") == 1
+    assert watch_env.watcher.handle_trigger("timer") == 0
+
+
+def test_raising_on_routed_callback_does_not_lose_state(watch_env):
+    watch_env.watcher.handle_trigger("timer")
+
+    def boom(*_):
+        raise RuntimeError("printer on fire")
+
+    watch_env.watcher.on_routed = boom
+    watch_env.add_row("INBOX", uid="7", message_id="<n7@x>", date=1_700_000_500, body="new", **ANN)
+    assert watch_env.watcher.handle_trigger("timer") == 1
+    assert watch_env.store.get_checkpoint("watch", "evolution")["a1/INBOX"] == 7
+    assert watch_env.watcher.handle_trigger("timer") == 0

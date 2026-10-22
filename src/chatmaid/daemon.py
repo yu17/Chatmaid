@@ -70,7 +70,7 @@ class Watcher:
         """
         try:
             return self._handle(kind)
-        except sqlite3.OperationalError as e:
+        except sqlite3.Error as e:
             log.warning("trigger %r skipped: %s", kind, e)
             return 0
 
@@ -111,7 +111,10 @@ class Watcher:
                 continue
             routed += 1
             if self.on_routed is not None:
-                self.on_routed(route, cid, msg)
+                try:
+                    self.on_routed(route, cid, msg)
+                except Exception:  # the message is already committed
+                    log.exception("on_routed callback failed for %s", ref.key())
         for key in held_back:
             new_state[key] = state[key]
         saved: dict = dict(new_state)
