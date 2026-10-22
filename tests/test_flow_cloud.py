@@ -153,3 +153,19 @@ def test_propose_on_non_pending_raises(flow_env):
     with pytest.raises(ValueError):
         env.flow.propose_cloud(did)
     assert env.store.cloud_calls() == []
+
+
+def test_send_on_resolved_draft_is_declined_without_a_call(flow_env):
+    env = flow_env
+    did = setup(env)
+    backend = FakeCloud()
+    with_backend(env, backend)
+    p = env.flow.propose_cloud(did)
+    env.flow.resolve(did, "dismiss")
+    with pytest.raises(ValueError, match="no longer pending"):
+        env.flow.send_cloud(p.call_id)
+    call = env.store.cloud_call(p.call_id)
+    assert call["status"] == "declined"
+    assert call["error"] == "draft no longer pending"
+    assert backend.prompts == []
+    assert len(env.store.draft_versions(did)) == 2

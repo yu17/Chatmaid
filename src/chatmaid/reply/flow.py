@@ -315,6 +315,13 @@ class ReplyFlow:
         """Send the stored payload, byte for byte, and store the re-hydrated result as a version."""
         call = self._proposed_call(call_id)
         store = self.store
+        draft = store.draft(call["draft_id"])
+        if draft is None or draft["status"] != "pending":
+            store.set_cloud_call_status(call_id, "declined", error="draft no longer pending")
+            store.log_event(
+                "cloud", "declined", str(call_id), {"reason": "draft no longer pending"}
+            )
+            raise ValueError("draft no longer pending")
         b = self.backend_factory(call["backend"])
         try:
             out = b.complete(call["payload"], CLOUD_SCHEMA)
