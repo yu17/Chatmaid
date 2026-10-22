@@ -80,9 +80,11 @@ Run commands as `uv run chatmaid [--config PATH] <command>` (default config is
 | `drafts` | `--status {pending,all}`, `--limit N` | list reply drafts |
 | `draft show ID` | | show a draft with its versions and cloud calls |
 | `draft run` | `--message ID`, `--fake-llm` | triage and draft one stored message |
-| `draft regenerate ID` | `--comment TEXT`, `--from VERSION` | write a new round of candidates from a comment |
-| `draft approve ID` / `draft edit ID` / `draft dismiss ID` | | approve a version, replace the text with your own, or dismiss |
-| `draft cloud ID` | `--backend {codex,claude}`, `--comment TEXT`, `--from VERSION` | propose a cloud improvement and print the exact payload |
+| `draft regenerate ID` | `--comment TEXT`, `--from VERSION`, `--fake-llm` | write a new round of candidates from a comment |
+| `draft approve ID` | `--version N` | approve a version |
+| `draft edit ID` | `--text TEXT` or `--file PATH` (one required) | replace the text with your own |
+| `draft dismiss ID` | | dismiss a draft |
+| `draft cloud ID` | `--backend {codex,claude}`, `--comment TEXT`, `--from VERSION`, `--fake-llm` | propose a cloud improvement and print the exact payload |
 | `draft send ID` / `draft decline ID` | | send a proposed payload to the backend, or decline it |
 | `cloud-calls` | `--limit N` | list cloud proposals and calls |
 | `cloud-check` | `--backend {codex,claude}` | send a canned, content-free prompt through a cloud CLI |
@@ -120,11 +122,15 @@ Notes:
 ## Cloud backends
 
 Cloud improvement is optional and always owner-triggered. `draft cloud ID`
-stores a proposal, prints the exact pseudonymized payload (names, addresses,
-and phone numbers become `[PERSON_n]`, `[EMAIL_n]`, `[PHONE_n]`, and URLs and bare domains `[URL_n]`; amounts too if
-`cloud.redact_amounts = true`), and sends nothing. Only `draft send ID`
-transmits that stored payload, byte for byte, after you confirm; `draft decline
-ID` discards it. The watcher never calls a cloud backend. The payload holds the
+stores a proposal and always prints the exact pseudonymized payload first
+(names, addresses, and phone numbers become `[PERSON_n]`, `[EMAIL_n]`,
+`[PHONE_n]`, URLs and bare domains `[URL_n]`; amounts too if
+`cloud.redact_amounts = true`). On a terminal it then asks `Send this to
+<backend>? [y/N]`: only `y` or `yes` sends, and any other answer declines the
+proposal. When stdin is not a terminal it sends nothing and prints
+`run: chatmaid draft send <id>  (or: chatmaid draft decline <id>)`; `draft send`
+and `draft decline` then act on that open proposal. A send transmits the stored
+payload byte for byte. The watcher never calls a cloud backend. The payload holds the
 previous draft, your comment, the conversation summary, and at most 1,500
 characters of the message being answered. The placeholder map stays local.
 Review the payload yourself: free text such as signatures can still carry
@@ -145,7 +151,8 @@ with a canned prompt that carries no mail content.
   `~/.config`.
 - The index holds no message bodies, only 200-character previews.
 - Phase 1 sends no mail. The only outbound traffic beyond LM Studio is a
-  consented cloud call (see Cloud backends).
+  consented cloud call (see Cloud backends) and `cloud-check`'s canned,
+  content-free call.
 
 ## Models
 
