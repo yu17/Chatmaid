@@ -215,6 +215,44 @@ def test_tagged_name_is_redacted(flow_env):
     assert any(k.startswith("[PERSON_") and v == "Zed" for k, v in mapping.items())
 
 
+def test_send_marks_sending_and_consent_before_transmit(flow_env):
+    env = flow_env
+    did = setup(env)
+    seen = {}
+
+    class Peek(FakeCloud):
+        def complete(self, prompt, schema):
+            row = env.store.cloud_call(p.call_id)
+            seen.update(status=row["status"], consented_at=row["consented_at"])
+            return super().complete(prompt, schema)
+
+    with_backend(env, Peek("codex", "m", {"text": "ok", "rationale": "ok"}))
+    p = env.flow.propose_cloud(did)
+    env.flow.send_cloud(p.call_id)
+    assert seen == {"status": "sending", "consented_at": 1_700_001_000}
+    call = env.store.cloud_call(p.call_id)
+    assert (call["status"], call["consented_at"]) == ("sent", 1_700_001_000)
+
+
+def test_interrupted_send_marks_failed_and_is_not_resendable(flow_env):
+    env = flow_env
+    did = setup(env)
+    with_backend(env, FakeCloud("codex", "m", KeyboardInterrupt()))
+    p = env.flow.propose_cloud(did)
+    with pytest.raises(KeyboardInterrupt):
+        env.flow.send_cloud(p.call_id)
+    call = env.store.cloud_call(p.call_id)
+    assert call["status"] == "failed"
+    assert "interrupted" in call["error"] and "KeyboardInterrupt" in call["error"]
+    assert call["consented_at"] == 1_700_001_000
+    assert any(e["kind"] == "failed" for e in env.store.events(limit=20))
+    with pytest.raises(ValueError, match="not proposed"):
+        env.flow.send_cloud(p.call_id)
+    with pytest.raises(ValueError, match="not proposed"):
+        env.flow.decline_cloud(p.call_id)
+    assert len(env.store.draft_versions(did)) == 2
+
+
 def test_tagger_covers_the_whole_message_not_just_the_raw_excerpt(flow_env):
     env = flow_env
     urls = " ".join(f"https://example.com/{i}/" + "a" * 300 for i in range(5))

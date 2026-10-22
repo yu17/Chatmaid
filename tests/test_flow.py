@@ -100,6 +100,54 @@ def test_owner_reply_with_other_text_resolves_edited(flow_env):
     assert d["outcome_preview"] == "Friday is bad, how about Monday?"
 
 
+def test_owner_reply_with_quoted_history_and_signature_is_approved(flow_env):
+    env = flow_env
+    env.arrive("100")
+    body = "Sure, Friday works.\n\nOn Mon, Ann wrote:\n> Can we meet Friday?\n-- \nJiaqi"
+    owner_reply(env, "200", body, "<m100@x>")
+    d = env.store.drafts(status=None)[0]
+    assert (d["status"], d["final_text"]) == ("approved", "Sure, Friday works.")
+
+
+def test_owner_reply_extending_a_candidate_is_approved(flow_env):
+    env = flow_env
+    env.arrive("100")
+    owner_reply(env, "200", "Friday is fine, thanks.\n--\nJiaqi\nSent from my phone", "<m100@x>")
+    d = env.store.drafts(status=None)[0]
+    assert (d["status"], d["final_text"]) == ("approved", "Friday is fine, thanks.")
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Yes.\n\nOn Mon, 21 Oct 2026, Ann <ann@x.org> wrote:\n> q\n> more", "Yes.\n\n"),
+        ("Yes.\n-----Original Message-----\nFrom: Ann", "Yes.\n"),
+        ("好的。\n\n在 2026年10月21日，Ann 写道：\n> 周五见？", "好的。\n\n"),
+        ("好的。\n2026年10月21日 10:00 Ann 写道:\n> 周五见？", "好的。\n"),
+        ("Yes.\n> quoted\nmore", "Yes.\n"),
+        ("Yes.\n-- \nJiaqi\nPhone", "Yes.\n"),
+        ("Yes.\n--\nJiaqi", "Yes.\n"),
+        ("Plain reply, no chrome.", "Plain reply, no chrome."),
+        ("Price -- not final\nOk", "Price -- not final\nOk"),
+    ],
+)
+def test_strip_reply_chrome_cases(text, expected):
+    from chatmaid.reply.flow import strip_reply_chrome
+
+    assert strip_reply_chrome(text) == expected
+
+
+def test_failed_draft_leaves_previous_draft_pending(flow_env):
+    env = flow_env
+    env.arrive("100")
+    first = env.store.drafts()[0]["id"]
+    env.llm.responses["reply_draft"] = '{"candidates":[],"lookup":""}'
+    env.arrive("101", in_reply_to="<m100@x>")
+    assert env.store.draft(first)["status"] == "pending"
+    assert [d["id"] for d in env.store.drafts(status=None)] == [first]
+    assert "draft_failed" in kinds(env)
+
+
 def test_owner_message_updates_summary_and_memories(flow_env):
     env = flow_env
     row = env.arrive("100")

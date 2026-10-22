@@ -2,7 +2,9 @@
 
 
 class FakeCloud:
-    def __init__(self, name: str = "fake", model: str = "fake", response: dict | Exception | None = None) -> None:
+    def __init__(
+        self, name: str = "fake", model: str = "fake", response: dict | BaseException | None = None
+    ) -> None:
         self.name = name
         self.model = model
         self.response = response if response is not None else {"text": "ok", "rationale": "fake"}
@@ -10,6 +12,6 @@ class FakeCloud:
 
     def complete(self, prompt: str, schema: dict) -> dict:
         self.prompts.append(prompt)
-        if isinstance(self.response, Exception):
+        if isinstance(self.response, BaseException):  # KeyboardInterrupt too
             raise self.response
         return self.response

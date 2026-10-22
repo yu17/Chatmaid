@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 import time
 from collections.abc import Callable
@@ -36,6 +37,26 @@ class CloudProposal:
 
 def _norm(text: str) -> str:
     return " ".join(text.split())
+
+
+_ATTRIBUTION_RE = re.compile(
+    r"On .* wrote:|-----Original Message-----|在.*写道[:：]?|\d{4}.*写道[:：]?|>"
+)
+
+
+def strip_reply_chrome(text: str) -> str:
+    """The owner's own words of a sent reply (ruling R16).
+
+    Cuts at the first quoted-history attribution (English or Chinese), the first quoted `>`
+    line, or a `-- ` signature separator, whichever comes first.
+    """
+    kept: list[str] = []
+    for line in text.splitlines(keepends=True):
+        bare = line.rstrip("\r\n")
+        if _ATTRIBUTION_RE.match(bare) or bare in ("-- ", "--"):
+            break
+        kept.append(line)
+    return "".join(kept)
 
 
 class ReplyFlow:
@@ -94,16 +115,16 @@ class ReplyFlow:
         if t.category != "needs_reply":
             return None
 
-        pending = store.pending_draft_for(conversation_id)
-        if pending is not None:
-            store.set_draft_status(pending["id"], "superseded")
         ctx = build_context(
             store, self.connector, self.llm, cfg, conversation_id, msg, now=self.now()
         )
         cands = draft_reply(
             store, self.connector, self.llm, cfg, ctx, sender_email=msg.sender.email
         )
-        with store.transaction():
+        with store.transaction():  # a failed draft leaves the previous one pending
+            pending = store.pending_draft_for(conversation_id)
+            if pending is not None:
+                store.set_draft_status(pending["id"], "superseded")
             draft_id = store.create_draft(
                 conversation_id, row["id"], language=ctx.language, context=ctx.to_json()
             )
@@ -123,11 +144,13 @@ class ReplyFlow:
         store = self.store
         pending = store.pending_draft_for(conversation_id)
         if pending is not None:
-            sent = _norm(msg.text)
-            match = next(
-                (v["text"] for v in store.draft_versions(pending["id"]) if _norm(v["text"]) == sent),
-                None,
-            )
+            sent = _norm(strip_reply_chrome(msg.text))
+            matches = [
+                v["text"]
+                for v in store.draft_versions(pending["id"])
+                if _norm(v["text"]) and sent.startswith(_norm(v["text"]))  # equal or extended
+            ]
+            match = max(matches, key=lambda t: len(_norm(t))) if matches else None
             status = "approved" if match is not None else "edited"
             with store.transaction():
                 store.set_draft_status(
@@ -336,6 +359,9 @@ class ReplyFlow:
             )
             raise ValueError("draft no longer pending")
         b = self.backend_factory(call["backend"])
+        # consent is on record before anything leaves the machine (ruling R15); a `sending`
+        # row is never `proposed` again, so even a hard kill cannot lead to a second send
+        store.set_cloud_call_status(call_id, "sending", consented_at=self.now())
         try:
             out = b.complete(call["payload"], CLOUD_SCHEMA)
             if not (
@@ -344,10 +370,11 @@ class ReplyFlow:
                 and isinstance(out.get("rationale"), str)
             ):
                 raise CloudError("cloud backend returned no text")
-        except CloudError as e:
-            store.set_cloud_call_status(call_id, "failed", error=str(e))
+        except BaseException as e:
+            error = str(e) if isinstance(e, CloudError) else f"interrupted: {type(e).__name__}"
+            store.set_cloud_call_status(call_id, "failed", error=error)
             store.log_event(
-                "cloud", "failed", str(call_id), {"backend": call["backend"], "error": str(e)}
+                "cloud", "failed", str(call_id), {"backend": call["backend"], "error": error}
             )
             raise
         mapping = json.loads(call["mapping_json"] or "{}")
@@ -359,8 +386,8 @@ class ReplyFlow:
         draft_id = call["draft_id"]
         try:
             with store.transaction():
-                store.set_cloud_call_status(
-                    call_id, "sent", consented_at=self.now(), response=response,
+                store.set_cloud_call_status(  # consented_at stays as the `sending` write set it
+                    call_id, "sent", response=response,
                     response_hash=hashlib.sha256(response.encode()).hexdigest(),
                 )
                 vid = store.add_draft_version(
