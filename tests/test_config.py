@@ -41,3 +41,39 @@ def test_defaults_mirror_example_config():
 
     with open("config.example.toml", "rb") as f:
         assert tomllib.load(f) == _DEFAULTS
+
+
+def test_draft_and_cloud_defaults(tmp_path):
+    cfg = load(Path("config.example.toml"), project_root=tmp_path)
+    assert cfg.draft.model_role == "main"
+    assert cfg.draft.candidates == 2
+    assert cfg.draft.recent_messages == 12
+    assert cfg.draft.memories == 8
+    assert cfg.draft.message_chars == 6000
+    assert cfg.cloud.default_backend == "codex"
+    assert cfg.cloud.codex_model == "gpt-6-astra"
+    assert cfg.cloud.claude_model == ""
+    assert cfg.cloud.timeout_s == 300
+    assert cfg.cloud.redact_amounts is False
+    assert cfg.draft_model == cfg.lmstudio.model_main
+
+
+def test_heavy_role_selects_heavy_model(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[draft]\nmodel_role = "heavy"\n')
+    cfg = load(p, project_root=tmp_path)
+    assert cfg.draft_model == cfg.lmstudio.model_heavy
+
+
+def test_invalid_model_role_rejected(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[draft]\nmodel_role = "huge"\n')
+    with pytest.raises(ConfigError):
+        load(p, project_root=tmp_path)
+
+
+def test_invalid_backend_rejected(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[cloud]\ndefault_backend = "gemini"\n')
+    with pytest.raises(ConfigError):
+        load(p, project_root=tmp_path)

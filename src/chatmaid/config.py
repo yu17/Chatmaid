@@ -45,11 +45,37 @@ class LMStudioConfig:
 
 
 @dataclass(frozen=True)
+class DraftConfig:
+    model_role: str
+    candidates: int
+    recent_messages: int
+    memories: int
+    message_chars: int
+
+
+@dataclass(frozen=True)
+class CloudConfig:
+    default_backend: str
+    codex_model: str
+    claude_model: str
+    timeout_s: int
+    redact_amounts: bool
+
+
+@dataclass(frozen=True)
 class Config:
     data: DataConfig
     owner: OwnerConfig
     email: EmailConfig
     lmstudio: LMStudioConfig
+    draft: DraftConfig
+    cloud: CloudConfig
+
+    @property
+    def draft_model(self) -> str:
+        if self.draft.model_role == "heavy":
+            return self.lmstudio.model_heavy
+        return self.lmstudio.model_main
 
     @property
     def index_path(self) -> Path:
@@ -84,6 +110,20 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
         "embedding_dim": 1024,
         "timeout_s": 600,
     },
+    "draft": {
+        "model_role": "main",
+        "candidates": 2,
+        "recent_messages": 12,
+        "memories": 8,
+        "message_chars": 6000,
+    },
+    "cloud": {
+        "default_backend": "codex",
+        "codex_model": "gpt-6-astra",
+        "claude_model": "",
+        "timeout_s": 300,
+        "redact_amounts": False,
+    },
 }
 
 
@@ -111,6 +151,13 @@ def load(path: Path, *, project_root: Path | None = None) -> Config:
         return {**_DEFAULTS[name], **raw.get(name, {})}
 
     d, o, e, lm = section("data"), section("owner"), section("email"), section("lmstudio")
+    dr, cl = section("draft"), section("cloud")
+    if dr["model_role"] not in ("main", "heavy"):
+        raise ConfigError(f"draft.model_role must be 'main' or 'heavy', got {dr['model_role']!r}")
+    if cl["default_backend"] not in ("codex", "claude"):
+        raise ConfigError(
+            f"cloud.default_backend must be 'codex' or 'claude', got {cl['default_backend']!r}"
+        )
     sent = e["local_maildir_sent"]
     return Config(
         data=DataConfig(dir=_resolve(d["dir"], project_root), hot_window_days=d["hot_window_days"]),
@@ -135,6 +182,20 @@ def load(path: Path, *, project_root: Path | None = None) -> Config:
             model_embedding=lm["model_embedding"],
             embedding_dim=lm["embedding_dim"],
             timeout_s=lm["timeout_s"],
+        ),
+        draft=DraftConfig(
+            model_role=dr["model_role"],
+            candidates=dr["candidates"],
+            recent_messages=dr["recent_messages"],
+            memories=dr["memories"],
+            message_chars=dr["message_chars"],
+        ),
+        cloud=CloudConfig(
+            default_backend=cl["default_backend"],
+            codex_model=cl["codex_model"],
+            claude_model=cl["claude_model"],
+            timeout_s=cl["timeout_s"],
+            redact_amounts=cl["redact_amounts"],
         ),
     )
 
