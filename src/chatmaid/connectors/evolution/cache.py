@@ -28,6 +28,20 @@ class MessageRow:
     size: int
 
 
+def _to_row(r: sqlite3.Row) -> MessageRow:
+    return MessageRow(
+        uid=str(r["uid"]),
+        flags=r["flags"] or 0,
+        dsent=int(r["dsent"] or 0),
+        dreceived=int(r["dreceived"] or 0),
+        subject=r["subject"] or "",
+        mail_from=r["mail_from"] or "",
+        mail_to=r["mail_to"] or "",
+        mail_cc=r["mail_cc"] or "",
+        size=r["size"] or 0,
+    )
+
+
 class EvolutionCache:
     def __init__(self, cache_dir: Path, account_uid: str):
         self._root = Path(cache_dir) / account_uid
@@ -73,19 +87,17 @@ class EvolutionCache:
         try:
             while batch := cur.fetchmany(_BATCH):
                 for r in batch:
-                    yield MessageRow(
-                        uid=str(r["uid"]),
-                        flags=r["flags"] or 0,
-                        dsent=int(r["dsent"] or 0),
-                        dreceived=int(r["dreceived"] or 0),
-                        subject=r["subject"] or "",
-                        mail_from=r["mail_from"] or "",
-                        mail_to=r["mail_to"] or "",
-                        mail_cc=r["mail_cc"] or "",
-                        size=r["size"] or 0,
-                    )
+                    yield _to_row(r)
         finally:
             cur.close()
+
+    def row(self, folder: FolderInfo, uid: str) -> MessageRow | None:
+        r = self._conn.execute(
+            "SELECT uid, flags, dsent, dreceived, subject, mail_from, mail_to, mail_cc, size"
+            f" FROM messages_{int(folder.folder_id)} WHERE uid = ?",
+            (uid,),
+        ).fetchone()
+        return None if r is None else _to_row(r)
 
     def max_uid(self, folder: FolderInfo) -> int | None:
         row = self._conn.execute(

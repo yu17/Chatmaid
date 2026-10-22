@@ -1,6 +1,17 @@
+import mailbox
+import re
 import sqlite3
+from datetime import datetime, timezone
+from email.utils import format_datetime
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+from chatmaid import config as chatmaid_config
+from chatmaid.connectors.evolution.connector import EvolutionConnector
+from chatmaid.connectors.evolution.sources import load_accounts
+from chatmaid.identity import OwnerIdentity
 
 from chatmaid.model import Address, NormalizedMessage, SourceRef
 from chatmaid.store import Store
@@ -114,3 +125,91 @@ def make_cache(tmp_path, account_uid, folders):
     finally:
         conn.close()
     return tmp_path
+
+
+def _mail(msg_id, frm, to, date, body, extra=""):
+    when = format_datetime(datetime.fromtimestamp(date, timezone.utc))
+    return (
+        f"Message-ID: {msg_id}\nFrom: {frm}\nTo: {to}\n{extra}Date: {when}\n"
+        "Subject: test\nContent-Type: text/plain; charset=utf-8\n\n" + body + "\n"
+    )
+
+
+def _set_toml(text, section, key, value):
+    pattern = re.compile(
+        rf"(^\[{section}\]\n(?:(?!^\[).*\n)*?{key}\s*=\s*)((?s:\[\n.*?^\])|[^\n]*)", re.M
+    )
+    new, n = pattern.subn(lambda m: m.group(1) + value, text, count=1)
+    assert n == 1, (section, key)
+    return new
+
+
+@pytest.fixture
+def fake_env(tmp_path, request):
+    sources = make_sources(
+        tmp_path,
+        [
+            dict(
+                uid="a1", display_name="me@x.org", backend="imapx", identity_uid="i1",
+                address="me@x.org",
+                sent_folder="folder://a1/%5bGmail%5d/Sent%20Mail",
+                drafts_folder="folder://a1/%5bGmail%5d/Drafts",
+            )
+        ],
+    )
+    one = _mail("<a@x>", "Ann <ann@x.org>", "me@x.org", 1_600_000_000, "hello there")
+    cache_dir = make_cache(
+        tmp_path,
+        "a1",
+        {
+            "INBOX": [
+                dict(uid="1", subject="s1", mail_from="Ann <ann@x.org>", mail_to="me@x.org", body=one),
+                dict(uid="2", subject="row subject", dsent=1_700_000_000,
+                     mail_from="Bob <bob@x.org>", mail_to="me@x.org"),
+            ],
+            "[Gmail]/Sent Mail": [
+                dict(uid="3", mail_from="me@x.org", mail_to="ann@x.org", dsent=1_700_000_100,
+                     body=_mail("<s3@x>", "me@x.org", "ann@x.org", 1_700_000_100,
+                                "thanks, see you tomorrow at the office", "In-Reply-To: <a@x>\n")),
+                dict(uid="5", mail_from="me@x.org", mail_to="li@x.org", dsent=1_700_000_300,
+                     body=_mail("<s5@x>", "me@x.org", "li@x.org", 1_700_000_300,
+                                "明天见，谢谢你的帮助，我们到时候再详细讨论项目的安排。")),
+            ],
+            "[Gmail]/All Mail": [
+                dict(uid="9", mail_from="Ann <ann@x.org>", mail_to="me@x.org", body=one),
+            ],
+            "News": [
+                dict(uid="4", mail_from="news@x.org", mail_to="me@x.org", dsent=1_700_000_200,
+                     body=_mail("<n4@x>", "news@x.org", "me@x.org", 1_700_000_200, "weekly digest",
+                                "List-Unsubscribe: <mailto:u@x>\n")),
+            ],
+        },
+    )
+    maildir = tmp_path / "local" / ".Sent"
+    maildir.parent.mkdir(parents=True, exist_ok=True)
+    md = mailbox.Maildir(maildir, factory=None, create=True)
+    md.add(_mail("<l1@x>", "me@x.org", "ann@x.org", 1_700_000_400, "sent from local").encode())
+    md.close()
+
+    text = (Path(__file__).resolve().parent.parent / "config.example.toml").read_text(encoding="utf-8")
+    text = _set_toml(text, "owner", "extra_addresses", '["me2@x.org"]')
+    text = _set_toml(text, "email", "evolution_config_dir", f'"{sources}"')
+    text = _set_toml(text, "email", "evolution_cache_dir", f'"{cache_dir}"')
+    text = _set_toml(text, "email", "accounts", '["a1"]')
+    text = _set_toml(text, "email", "skip_folders", "[]")
+    text = _set_toml(text, "email", "local_maildir_sent", f'"{maildir}"')
+    text = _set_toml(text, "lmstudio", "embedding_dim", "4")
+    config_path = tmp_path / "data" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(text, encoding="utf-8")
+
+    config = chatmaid_config.load(config_path, project_root=tmp_path)
+    cfg = config.email
+    accounts = load_accounts(cfg.evolution_config_dir, cfg.accounts)
+    owner = OwnerIdentity.from_accounts(accounts, config.owner.extra_addresses, config.owner.aliases)
+    connector = EvolutionConnector(cfg, accounts, owner)
+    request.addfinalizer(connector.close)
+    return SimpleNamespace(
+        config=config, config_path=config_path, cfg=cfg, accounts=accounts, owner=owner,
+        connector=connector, cache_dir=cache_dir, db_path=cache_dir / "a1" / "folders.db",
+    )

@@ -56,3 +56,14 @@ def test_opens_read_only(tmp_path):
             c._conn.execute("INSERT INTO keys VALUES ('x','y')")
     finally:
         c.close()
+
+
+def test_row_lookup(tmp_path):
+    cache_dir = make_cache(tmp_path, "a1", {"INBOX": [dict(uid="1", subject="s1"), dict(uid="2", subject="s2")]})
+    c = EvolutionCache(cache_dir, "a1")
+    try:
+        [inbox] = c.folders()
+        assert c.row(inbox, "2").subject == "s2"
+        assert c.row(inbox, "7") is None
+    finally:
+        c.close()

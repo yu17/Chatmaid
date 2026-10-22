@@ -6,7 +6,9 @@ from pathlib import Path
 
 from chatmaid import __version__
 from chatmaid.config import load as load_config
+from chatmaid.connectors.evolution.connector import EvolutionConnector
 from chatmaid.connectors.evolution.sources import load_accounts
+from chatmaid.identity import OwnerIdentity
 
 
 def _accounts_command(args: argparse.Namespace) -> int:
@@ -24,12 +26,33 @@ def register_accounts(subparsers) -> None:
     p.set_defaults(handler=_accounts_command)
 
 
+def _scan_command(args: argparse.Namespace) -> int:
+    cfg = load_config(Path(args.config))
+    accounts = load_accounts(cfg.email.evolution_config_dir, cfg.email.accounts)
+    owner = OwnerIdentity.from_accounts(accounts, cfg.owner.extra_addresses, cfg.owner.aliases)
+    connector = EvolutionConnector(cfg.email, accounts, owner)
+    try:
+        for uid, folder, rows, bodies, owned, bulk in connector.folder_stats(args.account):
+            print(f"{uid[:8]}  {folder}  rows={rows} bodies={bodies} owner={owned} bulk={bulk}")
+    finally:
+        connector.close()
+    return 0
+
+
+def register_scan(subparsers) -> None:
+    p = subparsers.add_parser("scan", help="count messages per Evolution account and folder")
+    p.add_argument("--account", default=None, help="only this account uid")
+    p.add_argument("--dry-run", action="store_true", help="do not touch the index")
+    p.set_defaults(handler=_scan_command)
+
+
 def build_parser() -> tuple[argparse.ArgumentParser, argparse._SubParsersAction]:
     parser = argparse.ArgumentParser(prog="chatmaid")
     parser.add_argument("--version", action="store_true", help="print version and exit")
     parser.add_argument("--config", default="data/config.toml", help="path to config.toml")
     subparsers = parser.add_subparsers(dest="command")
     register_accounts(subparsers)
+    register_scan(subparsers)
     return parser, subparsers
 
 
