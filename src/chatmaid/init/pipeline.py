@@ -1,4 +1,4 @@
-"""Init pipeline. Pass 1 (ingest) reads the connector into the store; no model calls."""
+"""Init pipeline: ingest (no model calls), digest; style and embed live in passes.py."""
 
 import json
 import logging
@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from chatmaid.config import Config
 from chatmaid.connectors.base import Connector
+from chatmaid.init import passes
 from chatmaid.init.chunking import chunk_messages
 from chatmaid.llm import prompts
 from chatmaid.llm.base import LLM, LLMError
@@ -139,9 +140,20 @@ class InitPipeline:
                 results[name] = self.ingest(opts)
             elif name == "digest":
                 results[name] = self.digest(opts)
+            elif name == "style":
+                results[name] = self.style(opts)
+            elif name == "embed":
+                results[name] = self.embed(opts)
             else:
-                raise NotImplementedError(f"pass {name!r} is not implemented yet")
+                raise ValueError(f"unknown pass {name!r}")
         return results
+
+    # -- passes 3 and 4 (see passes.py) ----------------------------------
+    def style(self, opts: InitOptions, *, min_samples: int = passes.MIN_STYLE_SAMPLES) -> dict[str, int]:
+        return passes.run_style(self, opts, min_samples=min_samples)
+
+    def embed(self, opts: InitOptions) -> int:
+        return passes.run_embed(self, opts)
 
     # -- pass 1: ingest -------------------------------------------------
     def ingest(self, opts: InitOptions) -> IngestStats:
@@ -244,7 +256,13 @@ class InitPipeline:
         return DigestStats(done, chunks, memories, failed)
 
     def _complete_json(
-        self, prompt: prompts.Prompt, user: str, model: str, *, think: bool
+        self,
+        prompt: prompts.Prompt,
+        user: str,
+        model: str,
+        *,
+        think: bool,
+        max_tokens: int = DIGEST_MAX_TOKENS,
     ) -> dict:
         """One reasoning-free call whose reply is validated against the prompt schema.
 
@@ -257,7 +275,7 @@ class InitPipeline:
                 user=message,
                 model=model,
                 json_schema=prompt.schema,
-                max_tokens=DIGEST_MAX_TOKENS,
+                max_tokens=max_tokens,
                 think=think,
             )
             try:

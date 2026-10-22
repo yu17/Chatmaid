@@ -255,3 +255,21 @@ def ingested_env(fake_env, store):
 
     InitPipeline(store, fake_env.connector, FakeLLM(), fake_env.config).ingest(InitOptions())
     return SimpleNamespace(**vars(fake_env), store=store)
+
+
+@pytest.fixture
+def digested_env(ingested_env):
+    from chatmaid.init.pipeline import InitOptions, InitPipeline
+    from chatmaid.llm.fake import FakeLLM
+
+    llm = FakeLLM(
+        {
+            "chunk_summary": '{"summary":"S1","events":[],"facts":[{"about":"Ann","text":"likes tea"}]}',
+            "rolling_summary": '{"summary":"S"}',
+        },
+        dim=4,
+    )
+    p = InitPipeline(ingested_env.store, ingested_env.connector, llm, ingested_env.config)
+    p.digest(InitOptions())
+    p.embed(InitOptions())
+    return ingested_env

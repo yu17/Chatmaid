@@ -264,6 +264,14 @@ class Store:
         params.append(limit)
         return self._conn.execute(sql, params).fetchall()
 
+    def owner_message_refs(self, *, limit: int) -> list[SourceRef]:
+        rows = self._conn.execute(
+            "SELECT ref_key FROM message WHERE is_owner = 1 AND bulk = 0 "
+            "ORDER BY sent_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [SourceRef.from_key(r["ref_key"]) for r in rows]
+
     def message_ids_for_account(
         self, platform: str, account: str
     ) -> list[tuple[str, tuple[str, ...]]]:
@@ -291,6 +299,14 @@ class Store:
             "conversation_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (kind, text, source_ref, observed_at, _now(), contact_id, conversation_id),
         ).lastrowid
+
+    def memories(self, *, limit: int | None = None) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM memory ORDER BY id"
+        params: tuple = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+        return self._conn.execute(sql, params).fetchall()
 
     def set_style_profile(
         self, language: str, tier: str, text: str, sample_refs: list[str]
@@ -357,6 +373,12 @@ class Store:
         except BaseException:
             self._conn.execute("ROLLBACK")
             raise
+
+    def embedding_hash(self, kind: str, ref_id: int) -> str | None:
+        row = self._conn.execute(
+            "SELECT text_hash FROM embedding_item WHERE kind = ? AND ref_id = ?", (kind, ref_id)
+        ).fetchone()
+        return row["text_hash"] if row else None
 
     def search_embeddings(
         self, vector: list[float], *, k: int = 10, kind: str | None = None
