@@ -215,6 +215,19 @@ def test_tagged_name_is_redacted(flow_env):
     assert any(k.startswith("[PERSON_") and v == "Zed" for k, v in mapping.items())
 
 
+def test_tagger_covers_the_whole_message_not_just_the_raw_excerpt(flow_env):
+    env = flow_env
+    urls = " ".join(f"https://example.com/{i}/" + "a" * 300 for i in range(5))
+    body = urls + " Please ask Quentin Blake about Friday."
+    assert body.index("Quentin") > 1500
+    env.arrive("100", body=body)
+    env.llm.responses["pii_tag"] = '{"persons":["Quentin Blake"]}'
+    p = env.flow.propose_cloud(env.store.drafts()[0]["id"])
+    excerpt = p.payload.split("## Message being answered\n")[1]
+    assert "Please ask" in excerpt
+    assert "Quentin" not in p.payload and "Blake" not in p.payload
+
+
 def test_tagger_sees_the_summary(flow_env):
     env = flow_env
     did = setup(env)

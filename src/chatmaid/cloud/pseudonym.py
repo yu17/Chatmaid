@@ -4,6 +4,7 @@ Placeholders are [PERSON_n], [EMAIL_n], [URL_n], [PHONE_n] and [AMOUNT_n].
 """
 
 import re
+import string
 from collections.abc import Callable, Iterable
 
 from chatmaid.config import Config
@@ -16,17 +17,47 @@ EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 URL_RE = re.compile(
     r"(?:https?://|www\.)[^\s<>\"']+"
     r"|(?<![A-Za-z0-9@._-])(?:[A-Za-z0-9-]+\.)+"
-    r"(?:com|org|net|edu|gov|io|co|cn|me|info|de|uk|jp|app|dev|ai|xyz)"
+    r"(?:com|org|net|edu|gov|io|co|cn|me|info|de|uk|jp|app|dev|ai|xyz"
+    r"|ca|fr|us|au|nl|it|es|se|ch|at|be|dk|fi|no|pl|ru|br|in|kr|hk|tw|sg|nz|ie|pt|cz"
+    r"|hu|gr|tr|mx|ar|za)"
     r"(?:/[^\s<>\"']*)?(?![A-Za-z0-9_]|[.-][A-Za-z0-9_])",
     re.I,
 )
-PHONE_RE = re.compile(r"(?<![\w.])\+?\d[\d \-]{7,}\d(?![\w.])")
+# Candidates only: `_looks_like_phone` drops dates and short numbers. A trailing full stop
+# ends a sentence, not the match (`(?!\w|\.\w)`), so "call 312-555-0142." is caught too.
+PHONE_RE = re.compile(r"(?<![\w.])\+?(?:\(\d{1,4}\)|\d)[\d\s().\-/]{5,}\d(?!\w|\.\w)")
 AMOUNT_RE = re.compile(
     r"(?:[$¥€£]|RMB|USD|CNY)\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s?(?:元|美元|块钱|块)"
 )
 
-_ISO_DATE_RE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$")
+_LEADING_DATE_RE = re.compile(
+    r"^(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})\s*"
+)
+_NAME_PART_STOPWORDS = frozenset(
+    "the and from team support office group dept department inc ltd llc co gmbh via of for"
+    .split()
+)
 _PLACEHOLDER_RE = re.compile(r"\[(?:PERSON|EMAIL|URL|PHONE|AMOUNT)_\d+\]")
+
+
+def _looks_like_phone(candidate: str) -> bool:
+    """A `PHONE_RE` match is a phone when, after one leading date, 7 or more digits remain."""
+    rest = _LEADING_DATE_RE.sub("", candidate, count=1)
+    return sum(ch.isdigit() for ch in rest) >= 7
+
+
+def _name_parts(full_name: str) -> list[str]:
+    """Parts of a multi-word name worth redacting alone: capitalised, not a stopword."""
+    parts = []
+    for word in full_name.split():
+        word = word.strip(string.punctuation)
+        if (
+            len(word) >= 3
+            and "A" <= word[0] <= "Z"
+            and word.lower() not in _NAME_PART_STOPWORDS
+        ):
+            parts.append(word)
+    return parts
 
 
 class Pseudonymizer:
@@ -35,20 +66,26 @@ class Pseudonymizer:
     def __init__(self, deny: Iterable[tuple[str, str]], *, redact_amounts: bool = False) -> None:
         self._redact_amounts = redact_amounts
         self._kinds: dict[str, str] = {}  # lowercase original -> kind
+        self._part_kinds: dict[str, str] = {}  # name part, exact case -> kind
         for original, kind in deny:
             original = original.strip()
             if len(original) >= 2 and kind != "EMAIL":  # EMAIL_RE covers addresses
                 self._kinds.setdefault(original.lower(), kind)
-                words = original.split()
-                if kind == "PERSON" and len(words) >= 2:
-                    for word in words:
-                        if len(word) >= 3:
-                            self._kinds.setdefault(word.lower(), kind)
+                if kind == "PERSON" and len(original.split()) >= 2:
+                    for part in _name_parts(original):
+                        self._part_kinds.setdefault(part, kind)
         originals = sorted(self._kinds, key=len, reverse=True)
-        parts = [
+        alts = [
             rf"(?<!\w){re.escape(o)}(?!\w)" if o.isascii() else re.escape(o) for o in originals
         ]
-        self._deny_re = re.compile("|".join(parts), re.IGNORECASE) if parts else None
+        self._deny_re = re.compile("|".join(alts), re.IGNORECASE) if alts else None
+        # Parts match case-sensitively, whole word: "Will Smith" must not redact "I will".
+        parts = sorted(
+            (w for w in self._part_kinds if w.lower() not in self._kinds), key=len, reverse=True
+        )
+        self._part_re = (
+            re.compile("|".join(rf"(?<!\w){re.escape(w)}(?!\w)" for w in parts)) if parts else None
+        )
         self._placeholders: dict[tuple[str, str], str] = {}
         self._counts: dict[str, int] = {}
         self._mapping: dict[str, str] = {}
@@ -87,7 +124,9 @@ class Pseudonymizer:
         text = self._sub(text, URL_RE, lambda s: "URL")  # before names: domains can hold them
         if self._deny_re:
             text = self._sub(text, self._deny_re, lambda s: self._kinds[s.lower()])
-        text = self._sub(text, PHONE_RE, lambda s: None if _ISO_DATE_RE.match(s) else "PHONE")
+        if self._part_re:
+            text = self._sub(text, self._part_re, lambda s: self._part_kinds[s])
+        text = self._sub(text, PHONE_RE, lambda s: "PHONE" if _looks_like_phone(s) else None)
         if self._redact_amounts:
             text = self._sub(text, AMOUNT_RE, lambda s: "AMOUNT")
         return text

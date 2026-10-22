@@ -1,3 +1,5 @@
+import pytest
+
 from chatmaid.cloud.pseudonym import Pseudonymizer, deny_list_for, tag_persons
 from chatmaid.llm.fake import FakeLLM
 from chatmaid.model import SourceRef
@@ -40,6 +42,24 @@ def test_phone_and_amount():
 
 def test_iso_date_is_not_a_phone():
     assert Pseudonymizer([]).redact("due 2026-10-22 at 10:00") == "due 2026-10-22 at 10:00"
+
+
+@pytest.mark.parametrize(
+    "phone",
+    ["(312) 555-0142", "312.555.0142", "+1 (312) 555-0142", "+86 138 0013 8000", "312-555-0142"],
+)
+def test_common_phone_formats_are_redacted(phone):
+    assert Pseudonymizer([]).redact(f"call {phone} today") == "call [PHONE_1] today"
+    assert Pseudonymizer([]).redact(f"Call {phone}.") == "Call [PHONE_1]."
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["due 2026-10-22 at 10:00", "starts 2026-10-22 10:00 sharp", "on 22/10/2026", "3.14 and 2.71",
+     "order 12345"],
+)
+def test_dates_and_short_numbers_are_not_phones(text):
+    assert Pseudonymizer([]).redact(text) == text
 
 
 def test_rehydrate_restores_and_reports_unknown():
@@ -93,3 +113,21 @@ def test_domain_boundaries():
     assert Pseudonymizer([]).redact("网站annlee.com。") == "网站[URL_1]。"
     text = "v1.2.3 report.pdf 3.14 e.g. notes.md"
     assert Pseudonymizer([]).redact(text) == text
+
+
+def test_country_code_domains_become_placeholders():
+    assert Pseudonymizer([]).redact("anna.ca and lee.fr") == "[URL_1] and [URL_2]"
+
+
+def test_lower_case_and_stopword_name_parts_are_not_redacted():
+    assert Pseudonymizer([("The Support Team", "PERSON")]).redact("The team will reply") == (
+        "The team will reply"
+    )
+    p = Pseudonymizer([("Will Smith", "PERSON")])
+    assert p.redact("I will send it to Smith") == "I will send it to [PERSON_1]"
+    assert p.mapping == {"[PERSON_1]": "Smith"}
+
+
+def test_name_parts_drop_punctuation():
+    p = Pseudonymizer([("Smith, John", "PERSON")])
+    assert p.redact("Smith wrote to John") == "[PERSON_1] wrote to [PERSON_2]"

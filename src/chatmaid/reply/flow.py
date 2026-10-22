@@ -278,7 +278,9 @@ class ReplyFlow:
         ctx = self._context_for(draft)
         deny = deny_list_for(self.store, self.cfg, draft["conversation_id"])
         try:
-            tag_text = "\n".join([previous, comment or "", ctx.summary, ctx.message[:1500]])
+            # the whole message (ruling R19): redaction shortens URLs and addresses, so the
+            # excerpt cut after redaction reaches further into the raw text than 1,500 chars
+            tag_text = "\n".join([previous, comment or "", ctx.summary, ctx.message])
             names = tag_persons(self.llm, self.cfg.lmstudio.model_small, tag_text)
         except LLMError as e:
             log.warning("draft %s: person tagging failed (%s); using the deny list only", draft_id, e)
