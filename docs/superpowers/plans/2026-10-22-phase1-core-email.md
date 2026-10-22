@@ -20,6 +20,8 @@
 - Hot window is 365 days (`data.hot_window_days = 365`).
 - In-scope accounts are the five Evolution source uids listed in config (`email.accounts`); owner addresses are derived from those accounts' identity sources plus `owner.aliases = ["jiaqi", "fishy"]`.
 - Gmail label folders `[Gmail]/All Mail`, `[Gmail]/Important`, `[Gmail]/Starred` are skipped (`email.skip_folders`); messages are deduplicated per account by `Message-ID`.
+- Per-folder watermark (controller rulings R6/R7, after discovering that Exchange and Microsoft 365 accounts use opaque base64 uids): when a folder's uids are all-digit strings, rows are ordered and filtered by `CAST(uid AS INTEGER)` and the watermark is the max uid; otherwise rows are ordered by `(dreceived, uid)`, filtered with `dreceived >= ?` (inclusive), and the watermark is the max `dreceived`. Watermarks are computed from the rows actually read, never from a separate `MAX()` query. Checkpoint and `scan_new` state values are these ints under the keys `"<account>/<folder>"`. Boundary duplicates are absorbed by the store (`ref_key`/`Message-ID` dedup in ingest; the watcher skips refs already present in the store). `rowid` is never used as a watermark because `VACUUM` renumbers it.
+- `chatmaid init --reset-checkpoints` deletes the `ingest` checkpoints before running (ruling R8), so a complete-history ingest can follow an earlier `--since` run.
 - No sending, no draft creation, no writes to Evolution or any server.
 - Commit after every task with the message prefix shown in the task.
 
@@ -949,7 +951,7 @@ Run: `uv run pytest tests/test_events.py tests/test_daemon.py -v` — Expected: 
 
 - [ ] **Step 3: Implement `events.py`, `daemon.py`, and `watch`**
 
-The `Watcher` reuses Task 9's module-level `build_thread_index` and `conversation_key` so both paths produce identical keys; it keeps one `ThreadIndex` per account for its lifetime and adds each routed message to it.
+The `Watcher` reuses Task 9's module-level `build_thread_index` and `conversation_key` so both paths produce identical keys; it keeps one `ThreadIndex` per account for its lifetime and adds each routed message to it. Before routing a ref returned by `scan_new`, the watcher skips it when the store already holds that `ref_key` (boundary duplicates from the inclusive `dreceived` watermark, see Global Constraints); `scan_new` itself follows the watermark rule (R6/R7) and the test `test_handle_trigger_routes_and_logs` must also cover a folder with non-integer uids.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
