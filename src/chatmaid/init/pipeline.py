@@ -104,6 +104,17 @@ def _validated(value, schema: dict):
     return value
 
 
+def schema_skeleton(schema: dict) -> str:
+    """Render the JSON shape of a schema (the subset our prompts use) as an example."""
+    kind = schema.get("type")
+    if kind == "object":
+        inner = ", ".join(f'"{k}": {schema_skeleton(v)}' for k, v in schema["properties"].items())
+        return "{" + inner + "}"
+    if kind == "array":
+        return "[" + schema_skeleton(schema["items"]) + "]"
+    return '"<string>"'
+
+
 def _missing(key: str):
     raise ValueError(f"missing required key {key!r}")
 
@@ -268,6 +279,8 @@ class InitPipeline:
 
         Invalid JSON or a missing required key gets one retry that shows the model its reply.
         """
+        if not think:  # no grammar: the model must be told the keys
+            user = f"{user}\n\nReply with exactly this JSON shape: {schema_skeleton(prompt.schema)}"
         message = user
         for attempt in range(2):
             raw = self.llm.complete(

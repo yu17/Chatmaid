@@ -107,3 +107,23 @@ def test_owner_message_refs_newest_first(ingested_env):
     times = [ingested_env.connector.fetch(r).sent_at for r in refs]
     assert times == sorted(times, reverse=True)
     assert len(ingested_env.store.owner_message_refs(limit=1)) == 1
+
+
+def test_schema_skeleton_chunk_summary():
+    from chatmaid.init.pipeline import schema_skeleton
+
+    assert schema_skeleton(load("chunk_summary").schema) == (
+        '{"summary": "<string>", "events": [{"date": "<string>", "text": "<string>"}], '
+        '"facts": [{"about": "<string>", "text": "<string>"}]}'
+    )
+    assert schema_skeleton(load("style_profile").schema) == '{"profile": "<string>"}'
+
+
+def test_json_shape_suffix_only_without_grammar(ingested_env):
+    llm = FakeLLM({"rolling_summary": '{"summary": "S"}'})
+    pipe = InitPipeline(ingested_env.store, ingested_env.connector, llm, ingested_env.config)
+    prompt = load("rolling_summary")
+    pipe._complete_json(prompt, "u", "m", think=False)
+    pipe._complete_json(prompt, "u", "m", think=True)
+    assert llm.calls[0]["user"] == 'u\n\nReply with exactly this JSON shape: {"summary": "<string>"}'
+    assert llm.calls[1]["user"] == "u"

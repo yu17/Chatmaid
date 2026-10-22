@@ -18,8 +18,6 @@ STYLE_MAX_PER_LANGUAGE = 60
 STYLE_MIN_CHARS = 20
 STYLE_SAMPLE_CHARS = 1500
 STYLE_MAX_TOKENS = 1024
-# Without grammar the model names its key after the prompt title ("style_profile"), so say it.
-_STYLE_FORMAT = '\n\nReply with exactly this JSON shape: {"profile": "<your description>"}'
 EMBED_BATCH = 32
 # Enough newest owner messages to fill 60 per language even when many are short.
 _OWNER_SCAN = 2000
@@ -49,11 +47,8 @@ def run_style(
     for language, samples in groups.items():
         if len(samples) < min_samples:
             continue
-        user = (
-            "\n".join(
-                f"{i}. {text[:STYLE_SAMPLE_CHARS]}" for i, (_, text) in enumerate(samples, start=1)
-            )
-            + _STYLE_FORMAT
+        user = "\n".join(
+            f"{i}. {text[:STYLE_SAMPLE_CHARS]}" for i, (_, text) in enumerate(samples, start=1)
         )
         try:
             out = pipeline._complete_json(
