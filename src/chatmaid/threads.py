@@ -26,11 +26,13 @@ class ThreadIndex:
     def __init__(self) -> None:
         self._parent: dict[str, str] = {}
         self._size: dict[str, int] = {}
+        self._min: dict[str, str] = {}
 
     def _find(self, x: str) -> str:
         if x not in self._parent:
             self._parent[x] = x
             self._size[x] = 1
+            self._min[x] = x
             return x
         root = x
         while self._parent[root] != root:
@@ -47,6 +49,7 @@ class ThreadIndex:
             ra, rb = rb, ra
         self._parent[rb] = ra
         self._size[ra] += self._size[rb]
+        self._min[ra] = min(self._min[ra], self._min[rb])
 
     def _link(self, message_id: str | None, references: Iterable[str]) -> str | None:
         ids = ([message_id] if message_id else []) + list(references)
@@ -65,4 +68,4 @@ class ThreadIndex:
         if anchor is None:
             return fallback
         root = self._find(anchor)
-        return min(k for k in self._parent if self._find(k) == root)
+        return self._min[root]
