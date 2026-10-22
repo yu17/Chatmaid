@@ -37,21 +37,43 @@ class Store:
     SCHEMA_VERSION = 2
 
     def __init__(self, path: Path, *, embedding_dim: int):
-        self._conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.enable_load_extension(True)
-        sqlite_vec.load(self._conn)
-        self._conn.enable_load_extension(False)
-        current = self._conn.execute("PRAGMA user_version").fetchone()[0]
-        for n in range(current + 1, self.SCHEMA_VERSION + 1):
-            schema = resources.files("chatmaid.store").joinpath(f"schema_v{n}.sql").read_text()
-            self._conn.executescript(schema)  # each file ends with its own PRAGMA user_version
-        self._conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_embedding USING vec0("
-            f"item_id INTEGER PRIMARY KEY, embedding float[{int(embedding_dim)}])"
-        )
+        # autocommit=True: no implicit transactions, and executescript() does not COMMIT an
+        # open transaction first, so a schema step can run inside BEGIN IMMEDIATE.
+        self._conn = sqlite3.connect(path, autocommit=True, check_same_thread=False)
+        try:
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA foreign_keys=ON")
+            self._conn.enable_load_extension(True)
+            sqlite_vec.load(self._conn)
+            self._conn.enable_load_extension(False)
+            current = self._conn.execute("PRAGMA user_version").fetchone()[0]
+            for n in range(current + 1, self.SCHEMA_VERSION + 1):
+                self._upgrade_to(n)
+            self._conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS vec_embedding USING vec0("
+                f"item_id INTEGER PRIMARY KEY, embedding float[{int(embedding_dim)}])"
+            )
+        except BaseException:
+            self._conn.close()
+            raise
+
+    def _upgrade_to(self, n: int) -> None:
+        """Apply `schema_v{n}.sql` as one transaction (ruling R20).
+
+        The version is re-read under the write lock, so a concurrent opener that already
+        applied the step is not repeated; an interrupted step rolls back whole and is retried
+        on the next open. Each file ends with its own `PRAGMA user_version = n`.
+        """
+        schema = resources.files("chatmaid.store").joinpath(f"schema_v{n}.sql").read_text()
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            if self._conn.execute("PRAGMA user_version").fetchone()[0] < n:
+                self._conn.executescript(schema)
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        self._conn.execute("COMMIT")
 
     def close(self) -> None:
         self._conn.close()
@@ -124,10 +146,12 @@ class Store:
     def merge_conversations(self, keep_id: int, drop_id: int) -> int:
         """Fold `drop_id` into `keep_id` (ruling R17) and return how many messages moved.
 
-        Messages, participants and memories are re-pointed, the counters of `keep_id` are
-        refreshed and `drop_id` is deleted together with its digest state and embedding. The
-        kept summary no longer describes the conversation, so it (and its digest state) is
-        cleared for the next digest pass to rewrite. Call inside `transaction()`.
+        Messages, participants, memories and drafts are re-pointed (of the pending drafts now
+        in `keep_id` only the newest stays pending; the older ones are superseded), the
+        counters of `keep_id` are refreshed and `drop_id` is deleted together with its digest
+        state and embedding. The kept summary no longer describes the conversation, so it (and
+        its digest state) is cleared for the next digest pass to rewrite. Call inside
+        `transaction()`.
         """
         if keep_id == drop_id:
             return 0
@@ -143,6 +167,15 @@ class Store:
         c.execute("DELETE FROM conversation_participant WHERE conversation_id = ?", (drop_id,))
         c.execute(
             "UPDATE memory SET conversation_id = ? WHERE conversation_id = ?", (keep_id, drop_id)
+        )
+        c.execute(
+            "UPDATE draft SET conversation_id = ? WHERE conversation_id = ?", (keep_id, drop_id)
+        )
+        c.execute(  # one pending draft per conversation: the newest stays pending
+            "UPDATE draft SET status = 'superseded', updated_at = ? "
+            "WHERE conversation_id = ? AND status = 'pending' AND id < "
+            "(SELECT MAX(id) FROM draft WHERE conversation_id = ? AND status = 'pending')",
+            (_now(), keep_id, keep_id),
         )
         for cid in (keep_id, drop_id):
             c.execute("DELETE FROM checkpoint WHERE task = 'digest' AND key = ?", (str(cid),))

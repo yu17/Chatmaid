@@ -222,7 +222,7 @@ class InitPipeline:
                     self._save_checkpoint(folder, top, failed, opts.since)
                 seen += batch_seen
                 skipped += batch_skipped
-            except (sqlite3.OperationalError, LLMError) as e:
+            except (sqlite3.Error, LLMError) as e:
                 log.warning("ingest of %s failed, batch rolled back: %s", folder, e)
                 failed.add(folder)
                 indexes.pop(account, None)  # may hold links of the rolled-back messages

@@ -274,3 +274,26 @@ def test_regenerate_falls_back_to_stored_context_when_message_is_gone(flow_env, 
     env.flow.regenerate(env.store.drafts()[0]["id"], "shorter")
     user = calls(env, "reply_revise")[-1]["user"]
     assert LONG[:200] in user and LONG[200:] not in user
+
+
+def test_reply_linking_two_drafted_conversations_merges_without_error(flow_env):
+    env = flow_env
+    a = env.arrive("100")
+    b = env.arrive("101", sender="Bob <bob@x.org>", subject="other topic")
+    assert a["conversation_id"] != b["conversation_id"]
+    first = {d["id"] for d in env.store.drafts(status=None)}
+    assert len(first) == 2
+    env.add_row(
+        "INBOX", uid="102", message_id="<m102@x>", sender="Ann <ann@x.org>", to="me@x.org",
+        date=1_700_000_600, body="Both, please.", in_reply_to="<m101@x>",
+        references=("<m100@x>", "<m101@x>"), subject="meeting",
+    )
+    assert env.watcher._handle("timer") == 1
+    assert "error" not in kinds(env)
+    from chatmaid.model import SourceRef
+
+    row = env.store.message_by_ref(SourceRef("evolution", "a1", "INBOX", "102").key())
+    drafts = env.store.drafts(status=None)
+    assert first <= {d["id"] for d in drafts}
+    assert {d["conversation_id"] for d in drafts} == {row["conversation_id"]}
+    assert [d["status"] for d in drafts].count("pending") == 1

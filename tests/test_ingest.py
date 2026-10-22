@@ -159,6 +159,20 @@ def test_ingest_batch_failure_rolls_back_and_retries_the_folder(fake_env, store,
     assert store.get_checkpoint("ingest", "a1/INBOX")["last_uid"] == 2
 
 
+def test_ingest_integrity_error_fails_only_that_folder(fake_env, store, monkeypatch):
+    real = store.upsert_message
+
+    def broken(cid, msg, sid):
+        if msg.message_id == "<a@x>":
+            raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+        return real(cid, msg, sid)
+
+    monkeypatch.setattr(store, "upsert_message", broken)
+    _pipeline(fake_env, store).ingest(InitOptions())
+    assert store.get_checkpoint("ingest", "a1/INBOX") is None
+    assert store.get_checkpoint("ingest", "a1/News")["last_uid"] == 4
+
+
 def test_rolled_back_batch_is_not_counted(fake_env, store, monkeypatch):
     real = store.set_checkpoint
     state = {"failed": False}

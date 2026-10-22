@@ -1,4 +1,6 @@
 import dataclasses
+import sqlite3
+from importlib import resources
 
 import pytest
 
@@ -248,3 +250,30 @@ def test_merge_resets_tracked(store):
 
 def test_store_reports_current_schema_version(store):
     assert store._conn.execute("PRAGMA user_version").fetchone()[0] == Store.SCHEMA_VERSION
+
+
+def test_interrupted_upgrade_is_retried_cleanly(tmp_path, monkeypatch):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(resources.files("chatmaid.store").joinpath("schema_v1.sql").read_text())
+    conn.close()
+    state = {"raised": False}
+
+    class Flaky(sqlite3.Connection):
+        def executescript(self, script):
+            if "user_version = 2" in script and not state["raised"]:
+                state["raised"] = True
+                super().executescript(script.split("CREATE TABLE draft (")[0])  # half applied
+                raise sqlite3.OperationalError("disk I/O error")
+            return super().executescript(script)
+
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: real_connect(*a, factory=Flaky, **k))
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+        Store(path, embedding_dim=4)
+    s = Store(path, embedding_dim=4)
+    try:
+        assert s._conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert s._conn.execute("SELECT name FROM sqlite_master WHERE name='draft'").fetchone()
+    finally:
+        s.close()

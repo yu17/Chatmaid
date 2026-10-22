@@ -1,8 +1,10 @@
+import dataclasses
 import sqlite3
 from importlib import resources
 
 import pytest
 
+from chatmaid.model import SourceRef
 from chatmaid.store import Store
 
 
@@ -109,3 +111,23 @@ def test_counts_include_drafts_and_cloud_calls(store, ids):
     store.create_draft(cid, mid, language="en", context={})
     store.add_cloud_call(draft_id=None, backend="b", model=None, payload="p", mapping={}, comment=None)
     assert store.counts()["drafts"] == 1 and store.counts()["cloud_calls"] == 1
+
+
+def test_merge_moves_drafts_and_keeps_one_pending(store, sample_message):
+    sid = store.upsert_identity("email", "sender@x.org", "Sender")
+    keep = store.upsert_conversation("email", "k1", "t", "thread")
+    drop = store.upsert_conversation("email", "k2", "t", "thread")
+    m1 = store.upsert_message(keep, sample_message, sid)
+    other = dataclasses.replace(
+        sample_message, ref=SourceRef("evolution", "acct1", "INBOX", "8"), message_id="<m8@x.org>"
+    )
+    m2 = store.upsert_message(drop, other, sid)
+    older = store.create_draft(drop, m2, language="en", context={})
+    newer = store.create_draft(keep, m1, language="en", context={})
+    with store.transaction():
+        store.merge_conversations(keep, drop)
+    assert store.conversation(drop) is None
+    assert {store.draft(d)["conversation_id"] for d in (older, newer)} == {keep}
+    assert store.draft(older)["status"] == "superseded"
+    assert store.draft(newer)["status"] == "pending"
+    assert store.pending_draft_for(keep)["id"] == newer
