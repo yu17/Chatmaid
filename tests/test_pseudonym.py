@@ -85,3 +85,11 @@ def test_urls_and_domains_become_placeholders():
     out = p.redact("see https://annlee.example.com/x and annlee.com or www.foo.org")
     assert out == "see [URL_1] and [URL_2] or [URL_3]"
     assert Pseudonymizer([]).redact("Hi Ann, ok.") == "Hi Ann, ok."
+
+
+def test_domain_boundaries():
+    assert Pseudonymizer([]).redact("Visit annlee.com.") == "Visit [URL_1]."
+    assert Pseudonymizer([]).redact("微信公众号abc.com好") == "微信公众号[URL_1]好"
+    assert Pseudonymizer([]).redact("网站annlee.com。") == "网站[URL_1]。"
+    text = "v1.2.3 report.pdf 3.14 e.g. notes.md"
+    assert Pseudonymizer([]).redact(text) == text

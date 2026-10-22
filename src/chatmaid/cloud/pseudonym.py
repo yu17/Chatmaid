@@ -15,8 +15,9 @@ from chatmaid.store.db import Store
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 URL_RE = re.compile(
     r"(?:https?://|www\.)[^\s<>\"']+"
-    r"|(?<![\w@.-])(?:[\w-]+\.)+(?:com|org|net|edu|gov|io|co|cn|me|info|de|uk|jp|app|dev|ai|xyz)"
-    r"(?:/[^\s<>\"']*)?(?![\w.-])",
+    r"|(?<![A-Za-z0-9@._-])(?:[A-Za-z0-9-]+\.)+"
+    r"(?:com|org|net|edu|gov|io|co|cn|me|info|de|uk|jp|app|dev|ai|xyz)"
+    r"(?:/[^\s<>\"']*)?(?![A-Za-z0-9_]|[.-][A-Za-z0-9_])",
     re.I,
 )
 PHONE_RE = re.compile(r"(?<![\w.])\+?\d[\d \-]{7,}\d(?![\w.])")
