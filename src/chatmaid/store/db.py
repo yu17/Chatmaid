@@ -32,6 +32,8 @@ def _like_escape(text: str) -> str:
 
 
 class Store:
+    SCHEMA_VERSION = 1
+
     def __init__(self, path: Path, *, embedding_dim: int):
         self._conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -40,9 +42,10 @@ class Store:
         self._conn.enable_load_extension(True)
         sqlite_vec.load(self._conn)
         self._conn.enable_load_extension(False)
-        if self._conn.execute("PRAGMA user_version").fetchone()[0] == 0:
-            schema = resources.files("chatmaid.store").joinpath("schema_v1.sql").read_text()
-            self._conn.executescript(schema)
+        current = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        for n in range(current + 1, self.SCHEMA_VERSION + 1):
+            schema = resources.files("chatmaid.store").joinpath(f"schema_v{n}.sql").read_text()
+            self._conn.executescript(schema)  # each file ends with its own PRAGMA user_version
         self._conn.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS vec_embedding USING vec0("
             f"item_id INTEGER PRIMARY KEY, embedding float[{int(embedding_dim)}])"
@@ -144,7 +147,8 @@ class Store:
             self._delete_embedding("conversation", cid)
         c.execute("DELETE FROM conversation WHERE id = ?", (drop_id,))
         c.execute(
-            "UPDATE conversation SET summary = NULL, summary_updated_at = NULL, events_json = NULL "
+            "UPDATE conversation SET summary = NULL, summary_updated_at = NULL, events_json = NULL, "
+            "tracked = 1 "
             "WHERE id = ?",
             (keep_id,),
         )

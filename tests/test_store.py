@@ -235,3 +235,16 @@ def test_merge_conversations(store, sample_message):
     assert store.get_checkpoint("digest", str(drop)) is None
     assert store.embedding_hash("conversation", drop) is None and store.counts()["embeddings"] == 0
     assert store.merge_conversations(keep, keep) == 0
+
+
+def test_merge_resets_tracked(store):
+    keep = store.upsert_conversation("email", "k1", "t", "thread")
+    drop = store.upsert_conversation("email", "k2", "t", "thread")
+    store.set_tracked(keep, False)
+    with store.transaction():
+        store.merge_conversations(keep, drop)
+    assert store.conversation(keep)["tracked"] == 1
+
+
+def test_store_reports_current_schema_version(store):
+    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == Store.SCHEMA_VERSION

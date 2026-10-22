@@ -11,7 +11,7 @@ def test_route_owner_to_owner_is_owner(watch_env):
 
 
 def test_first_trigger_after_ingest_routes_nothing(watch_env):
-    assert watch_env.watcher.handle_trigger("timer") == 0 and watch_env.store.events() == []
+    assert watch_env.watcher._handle("timer") == 0 and watch_env.store.events() == []
 
 
 def test_handle_trigger_routes_and_logs(watch_env):
@@ -22,7 +22,7 @@ def test_handle_trigger_routes_and_logs(watch_env):
     events = watch_env.store.events()
     assert n == 2 and sorted(e["kind"] for e in events) == ["incoming", "owner"]
     assert {e["source"] for e in events} == {"evolution"}
-    assert watch_env.watcher.handle_trigger("timer") == 0
+    assert watch_env.watcher._handle("timer") == 0
 
 
 def test_handle_trigger_time_mode_folder(watch_env):
@@ -30,12 +30,12 @@ def test_handle_trigger_time_mode_folder(watch_env):
     watch_env.watcher.handle_trigger("timer")
     watch_env.add_row("Exchange Inbox", uid="AQMkADMy1", message_id="<e1@x>", sender="bob@x.org", to="me@x.org", date=1_700_000_700, dreceived=1_700_000_700, body="hi")
     assert watch_env.watcher.handle_trigger("timer") == 1
-    assert watch_env.watcher.handle_trigger("timer") == 0
+    assert watch_env.watcher._handle("timer") == 0
 
 
 def test_duplicate_message_id_in_other_folder_is_skipped(watch_env):
     watch_env.add_row("[Gmail]/All Mail", uid="20", message_id="<a@x>", date=1_600_000_000, body="hello there", **ANN)
-    assert watch_env.watcher.handle_trigger("timer") == 0 and watch_env.store.events() == []
+    assert watch_env.watcher._handle("timer") == 0 and watch_env.store.events() == []
 
 
 def test_scan_survives_locked_db(watch_env):
@@ -76,7 +76,7 @@ async def test_run_handles_triggers_until_stopped(watch_env):
 def test_folder_without_ingest_checkpoint_is_baselined(watch_env):
     watch_env.add_folder("Archive")
     watch_env.add_row("Archive", uid="1", message_id="<old1@x>", date=1_600_000_001, body="old backlog", **ANN)
-    assert watch_env.watcher.handle_trigger("timer") == 0 and watch_env.store.events() == []
+    assert watch_env.watcher._handle("timer") == 0 and watch_env.store.events() == []
     watch_env.add_row("Archive", uid="2", message_id="<new2@x>", date=1_700_000_800, body="fresh", **ANN)
     assert watch_env.watcher.handle_trigger("timer") == 1
 
@@ -100,7 +100,7 @@ def test_row_without_body_is_deferred_until_body_arrives(watch_env):
     key = "a1/INBOX"
     before = watch_env.store.get_checkpoint("watch", "evolution")[key]
     assert watch_env.watcher.handle_trigger("timer") == 1  # uid 8 is routed, uid 7 waits
-    assert watch_env.watcher.handle_trigger("timer") == 0
+    assert watch_env.watcher._handle("timer") == 0
     state = watch_env.store.get_checkpoint("watch", "evolution")
     assert state[key] == before and list(state["_pending"].values()) == [2]
     path.write_text(text, encoding="utf-8")
@@ -112,7 +112,7 @@ def test_row_without_body_is_deferred_until_body_arrives(watch_env):
 def test_row_that_never_gets_a_body_is_routed_on_fourth_trigger(watch_env):
     watch_env.watcher.handle_trigger("timer")
     _add_bodyless(watch_env, "7")
-    assert [watch_env.watcher.handle_trigger("timer") for _ in range(4)] == [0, 0, 0, 1]
+    assert [watch_env.watcher._handle("timer") for _ in range(4)] == [0, 0, 0, 1]
     assert "_pending" not in watch_env.store.get_checkpoint("watch", "evolution")
 
 
@@ -121,7 +121,7 @@ def test_folder_appearing_later_is_baselined_not_routed(watch_env):
     watch_env.add_folder("Later")
     watch_env.add_row("Later", uid="1", message_id="<l1@x>", date=1_700_000_501, body="one", **ANN)
     watch_env.add_row("Later", uid="2", message_id="<l2@x>", date=1_700_000_502, body="two", **ANN)
-    assert watch_env.watcher.handle_trigger("timer") == 0
+    assert watch_env.watcher._handle("timer") == 0
     assert watch_env.store.get_checkpoint("watch", "evolution")["a1/Later"] == 2
     watch_env.add_row("Later", uid="3", message_id="<l3@x>", date=1_700_000_503, body="three", **ANN)
     assert watch_env.watcher.handle_trigger("timer") == 1
@@ -145,7 +145,7 @@ def test_poison_message_is_logged_and_others_still_routed(watch_env, monkeypatch
     kinds = sorted(e["kind"] for e in watch_env.store.events())
     assert kinds == ["error", "incoming"]
     assert watch_env.store.get_checkpoint("watch", "evolution")["a1/INBOX"] == 8
-    assert watch_env.watcher.handle_trigger("timer") == 0
+    assert watch_env.watcher._handle("timer") == 0
 
 
 def test_log_event_failure_rolls_back_message_and_keeps_state(watch_env, monkeypatch):
@@ -170,10 +170,10 @@ def test_time_mode_folder_appearing_later_is_baselined(watch_env):
     watch_env.add_folder("Exchange Later")
     watch_env.add_row("Exchange Later", uid="AQ1", message_id="<x1@x>", date=1_700_000_501, body="one", **ANN)
     watch_env.add_row("Exchange Later", uid="AQ2", message_id="<x2@x>", date=1_700_000_502, body="two", **ANN)
-    assert watch_env.watcher.handle_trigger("timer") == 0
+    assert watch_env.watcher._handle("timer") == 0
     watch_env.add_row("Exchange Later", uid="AQ3", message_id="<x3@x>", date=1_700_000_600, body="three", **ANN)
     assert watch_env.watcher.handle_trigger("timer") == 1
-    assert watch_env.watcher.handle_trigger("timer") == 0
+    assert watch_env.watcher._handle("timer") == 0
 
 
 def test_raising_on_routed_callback_does_not_lose_state(watch_env):
@@ -186,7 +186,7 @@ def test_raising_on_routed_callback_does_not_lose_state(watch_env):
     watch_env.add_row("INBOX", uid="7", message_id="<n7@x>", date=1_700_000_500, body="new", **ANN)
     assert watch_env.watcher.handle_trigger("timer") == 1
     assert watch_env.store.get_checkpoint("watch", "evolution")["a1/INBOX"] == 7
-    assert watch_env.watcher.handle_trigger("timer") == 0
+    assert watch_env.watcher._handle("timer") == 0
 
 
 def test_unexpected_error_in_scan_does_not_kill_the_trigger(watch_env, monkeypatch):
@@ -219,4 +219,4 @@ def test_watcher_merges_conversations_joined_by_a_new_message(watch_env):
     watch_env.add_row("INBOX", uid="9", message_id="<t3@x>", date=1_700_000_502, body="both", references=("<t1@x>", "<t2@x>"), **ANN)
     assert watch_env.watcher.handle_trigger("timer") == 1
     assert store.conversation(drop) is None and store.conversation(keep)["message_count"] == 3
-    assert watch_env.watcher.handle_trigger("timer") == 0
+    assert watch_env.watcher._handle("timer") == 0

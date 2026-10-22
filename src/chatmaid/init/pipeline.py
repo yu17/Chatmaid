@@ -181,7 +181,7 @@ class InitPipeline:
         touched: set[int] = set()
         top: dict[str, int] = {}  # folder key -> watermark over every row read this run
         failed: set[str] = set()
-        seen = skipped = 0
+        seen = skipped = 0  # committed batches only
 
         # The date filter is applied here rather than in the connector so the watermark also
         # covers the rows `since` excludes: they must not come back as "new" to the watcher.
@@ -189,6 +189,7 @@ class InitPipeline:
         for batch in _batches(messages, INGEST_BATCH):
             folder = _folder_key(batch[0])
             account = batch[0].ref.account
+            batch_seen = batch_skipped = 0
             try:
                 with store.transaction():
                     for msg in batch:
@@ -197,14 +198,16 @@ class InitPipeline:
                             top[folder] = max(top.get(folder, 0), mark)
                         if opts.since is not None and msg.sent_at < opts.since:
                             continue
-                        seen += 1
+                        batch_seen += 1
                         if msg.message_id and store.has_message_id("email", account, msg.message_id):
-                            skipped += 1
+                            batch_skipped += 1
                             continue
                         if account not in indexes:
                             indexes[account] = build_thread_index(store, "email", account)
                         touched.add(store_message(store, indexes[account], self.connector, msg))
                     self._save_checkpoint(folder, top, failed, opts.since)
+                seen += batch_seen
+                skipped += batch_skipped
             except (sqlite3.OperationalError, LLMError) as e:
                 log.warning("ingest of %s failed, batch rolled back: %s", folder, e)
                 failed.add(folder)

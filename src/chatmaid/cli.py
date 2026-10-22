@@ -22,6 +22,7 @@ from chatmaid.daemon import Watcher
 from chatmaid.identity import OwnerIdentity
 from chatmaid.init.pipeline import InitOptions, InitPipeline
 from chatmaid.llm.fake import FakeLLM
+from chatmaid.lock import Busy, exclusive
 from chatmaid.lookup import search_history
 from chatmaid.store import Store
 
@@ -113,6 +114,16 @@ class _NoLLM:
 
 def _init_command(args: argparse.Namespace) -> int:
     cfg = load_config(Path(args.config))
+    cfg.data.dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with exclusive(cfg.data.dir / "chatmaid.lock"):
+            return _init_locked(args, cfg)
+    except Busy as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+
+def _init_locked(args: argparse.Namespace, cfg) -> int:
     accounts = load_accounts(cfg.email.evolution_config_dir, cfg.email.accounts)
     owner = OwnerIdentity.from_accounts(accounts, cfg.owner.extra_addresses, cfg.owner.aliases)
     passes = ("ingest", "digest", "style", "embed") if args.pass_name == "all" else (args.pass_name,)
@@ -290,6 +301,16 @@ async def _watch(watcher: Watcher) -> None:
 def _watch_command(args: argparse.Namespace) -> int:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     cfg = load_config(Path(args.config))
+    cfg.data.dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with exclusive(cfg.data.dir / "chatmaid.lock"):
+            return _watch_locked(args, cfg)
+    except Busy as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+
+def _watch_locked(args: argparse.Namespace, cfg) -> int:
     accounts = load_accounts(cfg.email.evolution_config_dir, cfg.email.accounts)
     owner = OwnerIdentity.from_accounts(accounts, cfg.owner.extra_addresses, cfg.owner.aliases)
     connector = EvolutionConnector(cfg.email, accounts, owner)

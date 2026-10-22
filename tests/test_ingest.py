@@ -157,3 +157,18 @@ def test_ingest_batch_failure_rolls_back_and_retries_the_folder(fake_env, store,
     _pipeline(fake_env, store).ingest(InitOptions())
     assert store.has_message_id("email", "a1", "<a@x>")
     assert store.get_checkpoint("ingest", "a1/INBOX")["last_uid"] == 2
+
+
+def test_rolled_back_batch_is_not_counted(fake_env, store, monkeypatch):
+    real = store.set_checkpoint
+    state = {"failed": False}
+
+    def flaky(task, key, value):
+        if task == "ingest" and not state["failed"]:
+            state["failed"] = True
+            raise sqlite3.OperationalError("database is locked")
+        real(task, key, value)
+
+    monkeypatch.setattr(store, "set_checkpoint", flaky)
+    stats = InitPipeline(store, fake_env.connector, FakeLLM(), fake_env.config).ingest(InitOptions())
+    assert stats.messages == stats.new_messages + stats.skipped_dup
