@@ -105,4 +105,4 @@ def test_cli_llm_check_uses_grammar_mode(fake_env, monkeypatch, capsys):
 
     monkeypatch.setattr(cli, "LMStudioClient", Stub)
     assert main(["--config", str(fake_env.config_path), "llm-check"]) == 0
-    assert captured["think"] is True and "reply: OK" in capsys.readouterr().out
+    assert captured["grammar"] is True and "reply: OK" in capsys.readouterr().out

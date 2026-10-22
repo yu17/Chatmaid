@@ -52,7 +52,7 @@ def run_style(
         )
         try:
             out = pipeline._complete_json(
-                prompt, user, model, think=False, max_tokens=STYLE_MAX_TOKENS
+                prompt, user, model, grammar=False, max_tokens=STYLE_MAX_TOKENS
             )
         except LLMError as e:
             log.warning("style profile for %s failed: %s", language, e)

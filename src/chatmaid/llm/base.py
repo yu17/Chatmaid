@@ -17,7 +17,7 @@ class LLM(Protocol):
         json_schema: dict | None = None,
         max_tokens: int = 1024,
         temperature: float = 0.3,
-        think: bool = False,
+        grammar: bool = False,
     ) -> str: ...
 
     def embed(self, texts: list[str], *, model: str) -> list[list[float]]: ...

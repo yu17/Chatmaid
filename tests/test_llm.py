@@ -14,7 +14,7 @@ def test_fake_llm_records_calls_and_fails_on_request():
         f.complete(system="SUM\nmore", user="u", model="m")
     assert f.complete(system="# SUM\nmore", user="u", model="m") == '{"summary": "s"}'
     assert len(f.calls) == 2
-    assert set(f.calls[-1]) == {"system", "user", "model", "json_schema", "max_tokens", "temperature", "think"}
+    assert set(f.calls[-1]) == {"system", "user", "model", "json_schema", "max_tokens", "temperature", "grammar"}
 
 
 def test_fake_llm_unknown_key_returns_empty_object():
@@ -38,7 +38,7 @@ def test_lmstudio_client_builds_json_schema_request(monkeypatch):
 
     c = LMStudioClient("http://127.0.0.1:1/v1", "tok")
     monkeypatch.setattr(c._client.chat, "completions", FakeCompletions())
-    assert c.complete(system="s", user="u", model="m", json_schema={"type": "object"}, think=True) == '{"a":1}'
+    assert c.complete(system="s", user="u", model="m", json_schema={"type": "object"}, grammar=True) == '{"a":1}'
     assert captured["response_format"]["json_schema"]["schema"] == {"type": "object"}
     assert captured["model"] == "m"
 
@@ -49,7 +49,7 @@ def test_lmstudio_client_wraps_errors():
         c.list_models()
 
 
-def test_lmstudio_client_think_false_prefills_and_skips_response_format(monkeypatch):
+def test_lmstudio_client_grammar_false_prefills_and_skips_response_format(monkeypatch):
     captured = {}
 
     class FakeCompletions:
@@ -59,11 +59,11 @@ def test_lmstudio_client_think_false_prefills_and_skips_response_format(monkeypa
 
     c = LMStudioClient("http://127.0.0.1:1/v1", "tok")
     monkeypatch.setattr(c._client.chat, "completions", FakeCompletions())
-    c.complete(system="s", user="u", model="m", json_schema={"type": "object"}, think=False)
+    c.complete(system="s", user="u", model="m", json_schema={"type": "object"}, grammar=False)
     assert "response_format" not in captured
     assert captured["messages"][-1] == {"role": "assistant", "content": "<think>\n\n</think>\n\n"}
     captured.clear()
-    c.complete(system="s", user="u", model="m", json_schema={"type": "object"}, think=True)
+    c.complete(system="s", user="u", model="m", json_schema={"type": "object"}, grammar=True)
     assert captured["response_format"]["json_schema"]["strict"] is True
     assert [m["role"] for m in captured["messages"]] == ["system", "user"]
 
@@ -79,3 +79,9 @@ def test_lmstudio_client_empty_choices_is_an_llm_error(monkeypatch):
         c.complete(system="s", user="u", model="m")
 
 
+
+
+def test_fake_llm_sequence_responses():
+    llm = FakeLLM({"p": ['{"a":1}', '{"a":2}']})
+    out = [llm.complete(system="# p\nx", user="u", model="m") for _ in range(3)]
+    assert out == ['{"a":1}', '{"a":2}', '{"a":2}']

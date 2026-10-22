@@ -1,6 +1,5 @@
 """Init pipeline: ingest (no model calls), digest; style and embed live in passes.py."""
 
-import json
 import logging
 import sqlite3
 from collections.abc import Iterable, Iterator
@@ -13,6 +12,7 @@ from chatmaid.init import passes
 from chatmaid.init.chunking import chunk_messages
 from chatmaid.llm import prompts
 from chatmaid.llm.base import LLM, LLMError
+from chatmaid.llm.jsoncall import complete_json
 from chatmaid.model import NormalizedMessage
 from chatmaid.store import Store
 from chatmaid.threads import ThreadIndex, strip_subject_prefixes, thread_fallback_key
@@ -22,7 +22,6 @@ log = logging.getLogger(__name__)
 LOCAL_ACCOUNT = "local"  # Maildir uids are not integers: never checkpointed
 INGEST_BATCH = 200  # messages per store transaction
 DIGEST_MAX_TOKENS = 2048
-_RETRY_NOTE = "Your reply was not valid JSON matching the schema; reply with the JSON object only."
 
 
 @dataclass(frozen=True)
@@ -120,51 +119,6 @@ def _render(msgs: list[NormalizedMessage]) -> str:
         when = datetime.fromtimestamp(m.sent_at, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         lines.append(f"[{when} {m.sender.name or m.sender.email}] {m.text}")
     return "\n".join(lines)
-
-
-def _validated(value, schema: dict):
-    """Check `value` against the small JSON-schema subset our prompts use.
-
-    Raises ValueError on a wrong type or missing required key; malformed array items are dropped.
-    """
-    kind = schema.get("type")
-    if kind == "string":
-        if not isinstance(value, str):
-            raise ValueError("expected string")
-        return value
-    if kind == "array":
-        if not isinstance(value, list):
-            raise ValueError("expected array")
-        items = []
-        for item in value:
-            try:
-                items.append(_validated(item, schema["items"]))
-            except ValueError:
-                continue
-        return items
-    if kind == "object":
-        if not isinstance(value, dict):
-            raise ValueError("expected object")
-        return {
-            key: _validated(value[key], sub) if key in value else _missing(key)
-            for key, sub in schema["properties"].items()
-        }
-    return value
-
-
-def schema_skeleton(schema: dict) -> str:
-    """Render the JSON shape of a schema (the subset our prompts use) as an example."""
-    kind = schema.get("type")
-    if kind == "object":
-        inner = ", ".join(f'"{k}": {schema_skeleton(v)}' for k, v in schema["properties"].items())
-        return "{" + inner + "}"
-    if kind == "array":
-        return "[" + schema_skeleton(schema["items"]) + "]"
-    return '"<string>"'
-
-
-def _missing(key: str):
-    raise ValueError(f"missing required key {key!r}")
 
 
 def _event_time(date: str) -> int | None:
@@ -303,30 +257,10 @@ class InitPipeline:
         user: str,
         model: str,
         *,
-        think: bool,
+        grammar: bool,
         max_tokens: int = DIGEST_MAX_TOKENS,
     ) -> dict:
-        """One reasoning-free call whose reply is validated against the prompt schema.
-
-        Invalid JSON or a missing required key gets one retry that shows the model its reply.
-        """
-        if not think:  # no grammar: the model must be told the keys
-            user = f"{user}\n\nReply with exactly this JSON shape: {schema_skeleton(prompt.schema)}"
-        message = user
-        for attempt in range(2):
-            raw = self.llm.complete(
-                system=prompt.system,
-                user=message,
-                model=model,
-                json_schema=prompt.schema,
-                max_tokens=max_tokens,
-                think=think,
-            )
-            try:
-                return _validated(json.loads(raw), prompt.schema)
-            except ValueError:  # JSONDecodeError is a ValueError
-                message = f"{user}\n\nYour previous reply:\n{raw}\n\n{_RETRY_NOTE}"
-        raise LLMError(f"{prompt.name}: model did not return valid JSON for the schema")
+        return complete_json(self.llm, prompt, user, model, grammar=grammar, max_tokens=max_tokens)
 
     def _digest_conversation(self, cid: int, opts: InitOptions) -> tuple[int, int]:
         store = self.store
@@ -354,9 +288,9 @@ class InitPipeline:
         for i in range(start, len(chunks)):
             chunk = chunks[i]
             # model_small is non-thinking: it takes the strict schema, and the empty-think
-            # prefill (think=False) makes it degenerate, so chunk calls use think=True.
+            # prefill (grammar=False) makes it degenerate, so chunk calls use grammar=True.
             out = self._complete_json(
-                chunk_prompt, _render(chunk), self.cfg.lmstudio.model_small, think=True
+                chunk_prompt, _render(chunk), self.cfg.lmstudio.model_small, grammar=True
             )
             new_summary = out["summary"]
             if i > 0:
@@ -364,7 +298,7 @@ class InitPipeline:
                     rolling_prompt,
                     f"Previous summary:\n{summary}\n\nNew chunk summary:\n{new_summary}",
                     self.cfg.lmstudio.model_main,
-                    think=False,
+                    grammar=False,
                 )
                 new_summary = merged["summary"]
             summary = new_summary

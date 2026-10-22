@@ -77,13 +77,13 @@ def test_digest_resumes_from_chunk_checkpoint(ingested_env):
     assert store.get_checkpoint("digest", str(cid)) == {"done": True}
 
 
-def test_digest_models_think_and_retry(ingested_env):
+def test_digest_models_grammar_and_retry(ingested_env):
     llm = FakeLLM({"chunk_summary": "not json", "rolling_summary": '{"summary":"S"}'})
     st = pipeline(ingested_env, llm).digest(InitOptions(limit_conversations=1))
     assert st.failed == 1 and st.conversations == 0
     cfg = ingested_env.config.lmstudio
     assert [c["model"] for c in llm.calls] == [cfg.model_small, cfg.model_small]
-    assert all(c["think"] is True and c["max_tokens"] == 2048 for c in llm.calls)
+    assert all(c["grammar"] is True and c["max_tokens"] == 2048 for c in llm.calls)
     assert llm.calls[1]["user"].endswith(
         "Your reply was not valid JSON matching the schema; reply with the JSON object only."
     )

@@ -22,7 +22,7 @@ def test_style_profile_per_language(ingested_env):
     assert set(out) >= {"en"} and ingested_env.store.style_profile("en", "default") == "P"
     assert ingested_env.store.style_profile("zh", "default") == "P"
     call = llm.calls[0]
-    assert call["think"] is False and call["max_tokens"] == 1024
+    assert call["grammar"] is False and call["max_tokens"] == 1024
     assert "1. " in call["user"]
 
 
@@ -110,7 +110,7 @@ def test_owner_message_refs_newest_first(ingested_env):
 
 
 def test_schema_skeleton_chunk_summary():
-    from chatmaid.init.pipeline import schema_skeleton
+    from chatmaid.llm.jsoncall import schema_skeleton
 
     assert schema_skeleton(load("chunk_summary").schema) == (
         '{"summary": "<string>", "events": [{"date": "<string>", "text": "<string>"}], '
@@ -123,7 +123,7 @@ def test_json_shape_suffix_only_without_grammar(ingested_env):
     llm = FakeLLM({"rolling_summary": '{"summary": "S"}'})
     pipe = InitPipeline(ingested_env.store, ingested_env.connector, llm, ingested_env.config)
     prompt = load("rolling_summary")
-    pipe._complete_json(prompt, "u", "m", think=False)
-    pipe._complete_json(prompt, "u", "m", think=True)
+    pipe._complete_json(prompt, "u", "m", grammar=False)
+    pipe._complete_json(prompt, "u", "m", grammar=True)
     assert llm.calls[0]["user"] == 'u\n\nReply with exactly this JSON shape: {"summary": "<string>"}'
     assert llm.calls[1]["user"] == "u"

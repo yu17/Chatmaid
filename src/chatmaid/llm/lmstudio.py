@@ -20,7 +20,7 @@ class LMStudioClient:
         json_schema: dict | None = None,
         max_tokens: int = 1024,
         temperature: float = 0.3,
-        think: bool = False,
+        grammar: bool = False,
     ) -> str:
         kwargs: dict = {
             "model": model,
@@ -31,7 +31,7 @@ class LMStudioClient:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        if not think:
+        if not grammar:
             # An empty think block disables reasoning; LM Studio rejects it together with
             # response_format, so the schema is not enforced here (callers validate).
             kwargs["messages"].append({"role": "assistant", "content": "<think>\n\n</think>\n\n"})

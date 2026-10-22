@@ -77,7 +77,7 @@ def _llm_check_command(args: argparse.Namespace) -> int:
             user="ping",
             model=cfg.lmstudio.model_small,
             max_tokens=8,
-            think=True,  # grammar mode: what digest uses on model_small
+            grammar=True,  # grammar mode: what digest uses on model_small
         )
     except LLMError as e:
         print(f"llm-check failed: {e}", file=sys.stderr)
