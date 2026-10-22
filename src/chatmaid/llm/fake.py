@@ -24,6 +24,7 @@ class FakeLLM:
         json_schema: dict | None = None,
         max_tokens: int = 1024,
         temperature: float = 0.3,
+        think: bool = False,
     ) -> str:
         self.calls.append(
             {
@@ -33,6 +34,7 @@ class FakeLLM:
                 "json_schema": json_schema,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
+                "think": think,
             }
         )
         if self._failures > 0:

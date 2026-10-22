@@ -72,3 +72,41 @@ def test_digest_resumes_from_chunk_checkpoint(ingested_env):
     merges = [c for c in llm.calls if c["system"].startswith("# rolling_summary")]
     assert any("Previous summary:\npartial" in c["user"] for c in merges)
     assert store.get_checkpoint("digest", str(cid)) == {"done": True}
+
+
+def test_digest_models_think_and_retry(ingested_env):
+    llm = FakeLLM({"chunk_summary": "not json", "rolling_summary": '{"summary":"S"}'})
+    st = pipeline(ingested_env, llm).digest(InitOptions(limit_conversations=1))
+    assert st.failed == 1 and st.conversations == 0
+    cfg = ingested_env.config.lmstudio
+    assert [c["model"] for c in llm.calls] == [cfg.model_small, cfg.model_small]
+    assert all(c["think"] is True and c["max_tokens"] == 2048 for c in llm.calls)
+    assert llm.calls[1]["user"].endswith(
+        "Your reply was not valid JSON matching the schema; reply with the JSON object only."
+    )
+
+
+def test_digest_drops_malformed_items(ingested_env):
+    reply = {
+        "summary": "S1",
+        "events": [{"date": "2024-10-01"}, {"date": "2024-10-02", "text": "ok"}],
+        "facts": ["junk", {"about": "Ann", "text": "t"}],
+    }
+    llm = FakeLLM({"chunk_summary": json.dumps(reply), "rolling_summary": '{"summary":"S"}'})
+    st = pipeline(ingested_env, llm).digest(InitOptions(limit_conversations=1))
+    assert st.failed == 0 and st.memories == 2
+
+
+def test_digest_untracks_conversation_without_fetchable_messages(ingested_env, monkeypatch):
+    store = ingested_env.store
+
+    def gone(ref):
+        raise KeyError(ref.key())
+
+    monkeypatch.setattr(ingested_env.connector, "fetch", gone)
+    pending = len(store.conversations(needing_summary=True))
+    first = pipeline(ingested_env, FakeLLM(PLAIN)).digest(InitOptions())
+    assert first.failed == pending and first.conversations == 0
+    assert store.conversations(needing_summary=True) == []
+    second = pipeline(ingested_env, FakeLLM(PLAIN)).digest(InitOptions())
+    assert second.failed == 0 and second.conversations == 0

@@ -122,3 +122,23 @@ def test_participant_contact_ids(store):
     store.add_participant(cid, b)
     store.add_participant(cid, a)
     assert store.participant_contact_ids(cid) == sorted([a, b])
+
+
+def test_set_tracked_excludes_from_needing_summary(store):
+    cid = store.upsert_conversation("email", "k-trk", "t", "thread")
+    assert [r["id"] for r in store.conversations(needing_summary=True)] == [cid]
+    store.set_tracked(cid, False)
+    assert store.conversations(needing_summary=True) == []
+    assert [r["id"] for r in store.conversations()] == [cid]
+    store.set_tracked(cid, True)
+    assert len(store.conversations(needing_summary=True)) == 1
+
+
+def test_set_tracked_excludes_from_needing_summary(store):
+    cid = store.upsert_conversation("email", "k-trk", "t", "thread")
+    assert [r["id"] for r in store.conversations(needing_summary=True)] == [cid]
+    store.set_tracked(cid, False)
+    assert store.conversations(needing_summary=True) == []
+    assert [r["id"] for r in store.conversations()] == [cid]
+    store.set_tracked(cid, True)
+    assert len(store.conversations(needing_summary=True)) == 1

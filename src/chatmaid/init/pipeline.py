@@ -18,7 +18,8 @@ from chatmaid.threads import ThreadIndex, normalize_subject, thread_fallback_key
 log = logging.getLogger(__name__)
 
 LOCAL_ACCOUNT = "local"  # Maildir uids are not integers: never checkpointed
-DIGEST_MAX_TOKENS = 8192  # qwen3 reasoning tokens count against max_tokens; 1024 returned empty content
+DIGEST_MAX_TOKENS = 2048
+_RETRY_NOTE = "Your reply was not valid JSON matching the schema; reply with the JSON object only."
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,40 @@ def _render(msgs: list[NormalizedMessage]) -> str:
         when = datetime.fromtimestamp(m.sent_at, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         lines.append(f"[{when} {m.sender.name or m.sender.email}] {m.text}")
     return "\n".join(lines)
+
+
+def _validated(value, schema: dict):
+    """Check `value` against the small JSON-schema subset our prompts use.
+
+    Raises ValueError on a wrong type or missing required key; malformed array items are dropped.
+    """
+    kind = schema.get("type")
+    if kind == "string":
+        if not isinstance(value, str):
+            raise ValueError("expected string")
+        return value
+    if kind == "array":
+        if not isinstance(value, list):
+            raise ValueError("expected array")
+        items = []
+        for item in value:
+            try:
+                items.append(_validated(item, schema["items"]))
+            except ValueError:
+                continue
+        return items
+    if kind == "object":
+        if not isinstance(value, dict):
+            raise ValueError("expected object")
+        return {
+            key: _validated(value[key], sub) if key in value else _missing(key)
+            for key, sub in schema["properties"].items()
+        }
+    return value
+
+
+def _missing(key: str):
+    raise ValueError(f"missing required key {key!r}")
 
 
 def _event_time(date: str) -> int | None:
@@ -199,7 +234,7 @@ class InitPipeline:
         for row in rows:
             try:
                 n_chunks, n_memories = self._digest_conversation(row["id"], opts)
-            except (LLMError, ValueError, KeyError, TypeError) as e:
+            except LLMError as e:
                 log.warning("digest failed for conversation %s: %s", row["id"], e)
                 failed += 1
                 continue
@@ -208,15 +243,28 @@ class InitPipeline:
             memories += n_memories
         return DigestStats(done, chunks, memories, failed)
 
-    def _complete_json(self, prompt: prompts.Prompt, user: str) -> dict:
-        raw = self.llm.complete(
-            system=prompt.system,
-            user=user,
-            model=self.cfg.lmstudio.model_main,
-            json_schema=prompt.schema,
-            max_tokens=DIGEST_MAX_TOKENS,
-        )
-        return json.loads(raw)  # JSONDecodeError is a ValueError
+    def _complete_json(
+        self, prompt: prompts.Prompt, user: str, model: str, *, think: bool
+    ) -> dict:
+        """One reasoning-free call whose reply is validated against the prompt schema.
+
+        Invalid JSON or a missing required key gets one retry that shows the model its reply.
+        """
+        message = user
+        for attempt in range(2):
+            raw = self.llm.complete(
+                system=prompt.system,
+                user=message,
+                model=model,
+                json_schema=prompt.schema,
+                max_tokens=DIGEST_MAX_TOKENS,
+                think=think,
+            )
+            try:
+                return _validated(json.loads(raw), prompt.schema)
+            except ValueError:  # JSONDecodeError is a ValueError
+                message = f"{user}\n\nYour previous reply:\n{raw}\n\n{_RETRY_NOTE}"
+        raise LLMError(f"{prompt.name}: model did not return valid JSON for the schema")
 
     def _digest_conversation(self, cid: int, opts: InitOptions) -> tuple[int, int]:
         store = self.store
@@ -228,7 +276,8 @@ class InitPipeline:
                 log.warning("digest: message %s is no longer available", ref.key())
         chunks = chunk_messages(msgs, chunk_chars=opts.chunk_chars)
         if not chunks:
-            raise ValueError(f"conversation {cid} has no fetchable messages")
+            store.set_tracked(cid, False)
+            raise LLMError(f"conversation {cid} has no fetchable messages; untracked")
         chunk_prompt = prompts.load("chunk_summary")
         rolling_prompt = prompts.load("rolling_summary")
         owner = store.owner_contact_id()
@@ -242,12 +291,18 @@ class InitPipeline:
         memories = 0
         for i in range(start, len(chunks)):
             chunk = chunks[i]
-            out = self._complete_json(chunk_prompt, _render(chunk))
+            # model_small is non-thinking: it takes the strict schema, and the empty-think
+            # prefill (think=False) makes it degenerate, so chunk calls use think=True.
+            out = self._complete_json(
+                chunk_prompt, _render(chunk), self.cfg.lmstudio.model_small, think=True
+            )
             new_summary = out["summary"]
             if i > 0:
                 merged = self._complete_json(
                     rolling_prompt,
                     f"Previous summary:\n{summary}\n\nNew chunk summary:\n{new_summary}",
+                    self.cfg.lmstudio.model_main,
+                    think=False,
                 )
                 new_summary = merged["summary"]
             summary = new_summary
@@ -261,17 +316,11 @@ class InitPipeline:
         return len(chunks) - start, memories
 
     def _add_memories(self, out: dict, source_ref: str, cid: int, contact_id: int | None) -> int:
-        n = 0
-        for fact in out["facts"]:
+        rows = [("fact", f"{f['about']}: {f['text']}", None) for f in out["facts"]]
+        rows += [("event", e["text"], _event_time(e["date"])) for e in out["events"]]
+        for kind, text, observed_at in rows:
             self.store.add_memory(
-                kind="fact", text=f"{fact['about']}: {fact['text']}", source_ref=source_ref,
-                observed_at=None, contact_id=contact_id, conversation_id=cid,
+                kind=kind, text=text, source_ref=source_ref, observed_at=observed_at,
+                contact_id=contact_id, conversation_id=cid,
             )
-            n += 1
-        for event in out["events"]:
-            self.store.add_memory(
-                kind="event", text=event["text"], source_ref=source_ref,
-                observed_at=_event_time(event["date"]), contact_id=contact_id, conversation_id=cid,
-            )
-            n += 1
-        return n
+        return len(rows)

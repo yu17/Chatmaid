@@ -131,6 +131,11 @@ class Store:
             (conversation_id, contact_id),
         )
 
+    def set_tracked(self, conversation_id: int, tracked: bool) -> None:
+        self._conn.execute(
+            "UPDATE conversation SET tracked = ? WHERE id = ?", (int(tracked), conversation_id)
+        )
+
     def participant_contact_ids(self, conversation_id: int) -> list[int]:
         rows = self._conn.execute(
             "SELECT contact_id FROM conversation_participant WHERE conversation_id = ? "
@@ -150,7 +155,8 @@ class Store:
         if exclude_bulk:
             where.append("bulk = 0")
         if needing_summary is True:
-            where.append("summary IS NULL")
+            # untracked conversations (nothing left to read) are never offered for summarizing
+            where.append("summary IS NULL AND tracked != 0")
         elif needing_summary is False:
             where.append("summary IS NOT NULL")
         sql = "SELECT * FROM conversation"
