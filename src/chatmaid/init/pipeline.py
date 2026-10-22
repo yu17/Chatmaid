@@ -113,7 +113,7 @@ class DigestStats:
     failed: int
 
 
-def _render(msgs: list[NormalizedMessage]) -> str:
+def render_messages(msgs: list[NormalizedMessage]) -> str:
     lines = []
     for m in msgs:
         when = datetime.fromtimestamp(m.sent_at, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -127,6 +127,20 @@ def _event_time(date: str) -> int | None:
     except ValueError:
         return None
     return int(day.replace(tzinfo=timezone.utc).timestamp())
+
+
+def add_memories(
+    store: Store, out: dict, source_ref: str, cid: int, contact_id: int | None
+) -> int:
+    """Store the facts and events of one chunk summary as memories; returns how many."""
+    rows = [("fact", f"{f['about']}: {f['text']}", None) for f in out["facts"]]
+    rows += [("event", e["text"], _event_time(e["date"])) for e in out["events"]]
+    for kind, text, observed_at in rows:
+        store.add_memory(
+            kind=kind, text=text, source_ref=source_ref, observed_at=observed_at,
+            contact_id=contact_id, conversation_id=cid,
+        )
+    return len(rows)
 
 
 def _usable(state: dict, since: int | None) -> bool:
@@ -293,7 +307,7 @@ class InitPipeline:
             # model_small is non-thinking: it takes the strict schema, and the empty-think
             # prefill (grammar=False) makes it degenerate, so chunk calls use grammar=True.
             out = self._complete_json(
-                chunk_prompt, _render(chunk), self.cfg.lmstudio.model_small, grammar=True
+                chunk_prompt, render_messages(chunk), self.cfg.lmstudio.model_small, grammar=True
             )
             new_summary = out["summary"]
             if i > 0:
@@ -307,7 +321,7 @@ class InitPipeline:
             summary = new_summary
             events.extend(out["events"])
             with store.transaction():  # a chunk's memories and its checkpoint land together
-                memories += self._add_memories(out, chunk[0].ref.key(), cid, contact_id)
+                memories += add_memories(store, out, chunk[0].ref.key(), cid, contact_id)
                 store.set_checkpoint(
                     "digest", str(cid), {"chunk": i, "summary": summary, "events": events}
                 )
@@ -315,13 +329,3 @@ class InitPipeline:
             store.set_conversation_summary(cid, summary, events=events)
             store.set_checkpoint("digest", str(cid), {"done": True})
         return len(chunks) - start, memories
-
-    def _add_memories(self, out: dict, source_ref: str, cid: int, contact_id: int | None) -> int:
-        rows = [("fact", f"{f['about']}: {f['text']}", None) for f in out["facts"]]
-        rows += [("event", e["text"], _event_time(e["date"])) for e in out["events"]]
-        for kind, text, observed_at in rows:
-            self.store.add_memory(
-                kind=kind, text=text, source_ref=source_ref, observed_at=observed_at,
-                contact_id=contact_id, conversation_id=cid,
-            )
-        return len(rows)

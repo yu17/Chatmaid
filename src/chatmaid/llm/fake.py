@@ -5,6 +5,19 @@ import hashlib
 from chatmaid.llm.base import LLMError
 
 
+CANNED: dict[str, str] = {
+    "triage": '{"category":"needs_reply","tier":"work","reason":"asks a question"}',
+    "reply_draft": (
+        '{"candidates":[{"text":"Sure, Friday works.","rationale":"short confirmation"},'
+        '{"text":"Friday is fine, thanks.","rationale":"warmer"}],"lookup":""}'
+    ),
+    "reply_revise": '{"text":"Sure, Friday works. Thanks for the reminder.","rationale":"added thanks"}',
+    "chunk_summary": '{"summary":"S1","events":[],"facts":[{"about":"Ann","text":"likes tea"}]}',
+    "rolling_summary": '{"summary":"S"}',
+    "pii_tag": '{"persons":[]}',
+}
+
+
 class FakeLLM:
     def __init__(self, responses: dict[str, str | list[str]] | None = None, *, dim: int = 4) -> None:
         self.responses = responses or {}

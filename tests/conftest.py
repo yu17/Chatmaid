@@ -168,11 +168,12 @@ def add_time_folder(db_path, name, rows):
 
 
 def add_row(db_path, folder, *, uid, message_id, sender, to, date, body, dreceived=None,
-            in_reply_to=None, references=(), subject="test"):
+            in_reply_to=None, references=(), subject="test", extra_headers=""):
     """Insert one row (and its body file, named as Camel would) into a folder of a fixture cache."""
     extra = f"In-Reply-To: {in_reply_to}\n" if in_reply_to else ""
     if references:
         extra += "References: " + " ".join(references) + "\n"
+    extra += extra_headers
     conn = sqlite3.connect(db_path)
     try:
         fid = conn.execute("SELECT folder_id FROM folders WHERE folder_name = ?", (folder,)).fetchone()[0]
@@ -356,3 +357,33 @@ def watch_env(ingested_env):
         **vars(env), watcher=watcher, message=message,
         add_row=functools.partial(add_row, env.db_path), add_folder=add_folder,
     )
+
+
+@pytest.fixture
+def flow_env(watch_env):
+    from chatmaid.cloud.fake import FakeCloud
+    from chatmaid.llm.fake import CANNED, FakeLLM
+    from chatmaid.reply.flow import ReplyFlow
+
+    env = watch_env
+    llm = FakeLLM(dict(CANNED), dim=4)
+    flow = ReplyFlow(
+        env.store, env.connector, llm, env.config, now=lambda: 1_700_001_000,
+        backend_factory=lambda name: FakeCloud(
+            name or "codex", "m", {"text": "[PERSON_1], Friday works.", "rationale": "ok"}
+        ),
+    )
+    env.watcher.on_routed = flow.dispatch
+
+    def arrive(uid, *, sender="Ann <ann@x.org>", to="me@x.org", body="Can we meet Friday?",
+               folder="INBOX", message_id=None, in_reply_to=None, date=1_700_000_500,
+               subject="meeting", extra_headers=""):
+        env.add_row(
+            folder, uid=uid, message_id=message_id or f"<m{uid}@x>", sender=sender, to=to,
+            date=date, body=body, in_reply_to=in_reply_to, subject=subject,
+            extra_headers=extra_headers,
+        )
+        env.watcher._handle("timer")
+        return env.store.message_by_ref(SourceRef("evolution", "a1", folder, uid).key())
+
+    return SimpleNamespace(**vars(env), llm=llm, flow=flow, arrive=arrive)
