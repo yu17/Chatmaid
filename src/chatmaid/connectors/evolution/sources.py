@@ -1,13 +1,10 @@
 """Discover Evolution mail accounts from its GKeyFile-format ``*.source`` files."""
 
-import argparse
 import configparser
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote
-
-from chatmaid.config import load as load_config
 
 
 class MissingAccount(Exception):
@@ -78,18 +75,3 @@ def load_accounts(config_dir: Path, uids: Sequence[str]) -> list[EvolutionAccoun
             )
         )
     return accounts
-
-
-def _accounts_command(args: argparse.Namespace) -> int:
-    cfg = load_config(Path(args.config))
-    for a in load_accounts(cfg.email.evolution_config_dir, cfg.email.accounts):
-        print(
-            f"{a.uid[:8]}  {a.backend}  {a.display_name}  "
-            f"sent={a.sent_folder or '-'}  identities={len(a.identity_addresses)}"
-        )
-    return 0
-
-
-def register_accounts(subparsers) -> None:
-    p = subparsers.add_parser("accounts", help="list configured Evolution mail accounts")
-    p.set_defaults(handler=_accounts_command)

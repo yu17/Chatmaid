@@ -2,8 +2,26 @@
 
 import argparse
 
+from pathlib import Path
+
 from chatmaid import __version__
-from chatmaid.connectors.evolution.sources import register_accounts
+from chatmaid.config import load as load_config
+from chatmaid.connectors.evolution.sources import load_accounts
+
+
+def _accounts_command(args: argparse.Namespace) -> int:
+    cfg = load_config(Path(args.config))
+    for a in load_accounts(cfg.email.evolution_config_dir, cfg.email.accounts):
+        print(
+            f"{a.uid[:8]}  {a.backend}  {a.display_name}  "
+            f"sent={a.sent_folder or '-'}  identities={len(a.identity_addresses)}"
+        )
+    return 0
+
+
+def register_accounts(subparsers) -> None:
+    p = subparsers.add_parser("accounts", help="list configured Evolution mail accounts")
+    p.set_defaults(handler=_accounts_command)
 
 
 def build_parser() -> tuple[argparse.ArgumentParser, argparse._SubParsersAction]:
