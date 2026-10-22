@@ -85,7 +85,7 @@ tests/test_config.py … tests/test_daemon.py     one test module per source mod
 - `data/config.toml` written from `config.example.toml` with `email.*` paths pointing at the fixtures, `email.accounts = ["a1"]`, `owner.extra_addresses = ["me2@x.org"]`, `lmstudio.embedding_dim = 4`.
 - Returns `SimpleNamespace(config: Config, config_path: Path, cfg: EmailConfig, accounts, owner, connector, cache_dir, db_path = cache_dir/"a1"/"folders.db")`.
 
-`store` = `Store(tmp_path / "index.sqlite", embedding_dim=4)`. `ingested_env` = `fake_env` plus `store` after `InitPipeline(...).ingest(InitOptions())`. `digested_env` = `ingested_env` after `digest` and `embed` with `FakeLLM({"chunk_summary": ..., "rolling_summary": ...}, dim=4)` (the canned JSON from Task 10). `watch_env` = `fake_env` plus `store` plus `Watcher(store, connector, EventSource([db_path], enable_dbus=False))` with no prior ingest, and a `message(sender, to, folder)` helper returning a `NormalizedMessage` whose `is_owner` is computed through `owner.matches`.
+`store` = `Store(tmp_path / "index.sqlite", embedding_dim=4)`. `ingested_env` = `fake_env` plus `store` after `InitPipeline(...).ingest(InitOptions())`. `digested_env` = `ingested_env` after `digest` and `embed` with `FakeLLM({"chunk_summary": ..., "rolling_summary": ...}, dim=4)` (the canned JSON from Task 10). `watch_env` = `ingested_env` plus `Watcher(store, connector, EventSource([db_path], enable_dbus=False))`, a `message(sender, to, folder)` helper returning a `NormalizedMessage` whose `is_owner` is computed through `owner.matches`, an `add_row(folder, *, uid, message_id, sender, to, date, body, dreceived=None, in_reply_to=None)` helper that appends one row plus body file to the fake cache (writable in tests; `dsent=date`, `dreceived=dreceived or date`, saved_count updated), and an `add_folder(name, *, time_mode=False)` helper that creates an empty folder table (ruling R14). The watcher's scan state starts from the ingest checkpoints when no watch state exists, so the first trigger after ingest routes nothing.
 
 ---
 
@@ -913,7 +913,7 @@ git commit -m "feat: history lookup and read-only CLI views"
 
 **Interfaces:**
 - Produces: `EventSource(db_paths: list[Path], *, interval_s: int = 60, enable_dbus: bool = True)` with `async triggers() -> AsyncIterator[str]` yielding `"dbus"` on the session-bus signal `Newmail` (interface `org.gnome.evolution.mail.dbus.Signal`, path `/org/gnome/evolution/mail/newmail`, via `dbus_fast.aio.MessageBus` with an `add_match` rule and a message handler), `"file"` when `watchfiles.awatch` reports a change to any `db_paths` entry (debounced to one trigger per 2 s), and `"timer"` every `interval_s`; D-Bus connection failure logs a warning and the source continues with the other two.
-- Produces: `Watcher(store: Store, connector: Connector, events: EventSource)` with `async run(stop: asyncio.Event) -> None`, `handle_trigger(kind: str) -> int` (number of messages routed) that calls `connector.scan_new(state)` with `state = store.get_checkpoint("watch", connector.name) or {}`, fetches each ref, routes with `route(msg) -> str` returning `"owner"` when `msg.is_owner` else `"incoming"`, then `on_owner_message(msg)` or `on_incoming(msg)`, and saves the new state; both handlers upsert identities, the conversation (same key derivation as ingest, reusing a `ThreadIndex` built from the store) and the message, then `store.log_event("evolution", "owner"|"incoming", msg.ref.key(), {"bulk": msg.bulk, "conversation_id": cid, "subject": msg.subject})`; `sqlite3.OperationalError` from `scan_new` is logged and the trigger is skipped.
+- Produces: `Watcher(store: Store, connector: Connector, events: EventSource)` with `async run(stop: asyncio.Event) -> None`, `handle_trigger(kind: str) -> int` (number of messages routed) that calls `connector.scan_new(state)` with `state = store.get_checkpoint("watch", connector.name)`, falling back when absent to the ingest checkpoints' `last_uid` values under the same `"<account>/<folder>"` keys (ruling R14), else `{}`; refs whose `ref_key` the store already holds (`Store.has_ref(ref_key)`) or whose `Message-ID` is already present are skipped without an event, fetches each ref, routes with `route(msg) -> str` returning `"owner"` when `msg.is_owner` else `"incoming"`, then `on_owner_message(msg)` or `on_incoming(msg)`, and saves the new state; both handlers upsert identities, the conversation (same key derivation as ingest, reusing a `ThreadIndex` built from the store) and the message, then `store.log_event("evolution", "owner"|"incoming", msg.ref.key(), {"bulk": msg.bulk, "conversation_id": cid, "subject": msg.subject})`; `sqlite3.OperationalError` from `scan_new` is logged and the trigger is skipped.
 - CLI: `chatmaid watch [--interval 60] [--no-dbus]` runs until SIGINT and prints one line per routed message `kind  conversation_id  sender  subject`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -932,13 +932,29 @@ def test_route_owner_to_owner_is_owner(watch_env):   # message From me@x.org To 
     msg = watch_env.message(sender="me@x.org", to="me2@x.org", folder="INBOX")
     assert watch_env.watcher.route(msg) == "owner"
 
-def test_handle_trigger_routes_and_logs(watch_env):   # fixture cache has 1 new INBOX message from ann@x.org and 1 Sent message
+def test_first_trigger_after_ingest_routes_nothing(watch_env):   # store already holds every fixture message
+    assert watch_env.watcher.handle_trigger("timer") == 0 and watch_env.store.events() == []
+
+def test_handle_trigger_routes_and_logs(watch_env):
+    watch_env.watcher.handle_trigger("timer")                     # establish the watermark state
+    watch_env.add_row("INBOX", uid="7", message_id="<n7@x>", sender="ann@x.org", to="me@x.org", date=1_700_000_500, body="new question")
+    watch_env.add_row("[Gmail]/Sent Mail", uid="8", message_id="<s8@x>", sender="me@x.org", to="ann@x.org", date=1_700_000_600, body="my answer")
     n = watch_env.watcher.handle_trigger("timer")
     kinds = sorted(e["kind"] for e in watch_env.store.events())
     assert n == 2 and kinds == ["incoming", "owner"]
     assert watch_env.watcher.handle_trigger("timer") == 0
 
+def test_handle_trigger_time_mode_folder(watch_env):   # opaque uids: watermark is dreceived, inclusive boundary must not re-route
+    watch_env.add_folder("Exchange Inbox", time_mode=True)
+    watch_env.watcher.handle_trigger("timer")
+    watch_env.add_row("Exchange Inbox", uid="AQMkADMy1", message_id="<e1@x>", sender="bob@x.org", to="me@x.org", date=1_700_000_700, dreceived=1_700_000_700, body="hi")
+    assert watch_env.watcher.handle_trigger("timer") == 1
+    assert watch_env.watcher.handle_trigger("timer") == 0
+
 def test_scan_survives_locked_db(watch_env):
+    watch_env.watcher.handle_trigger("timer")
+    watch_env.add_row("INBOX", uid="7", message_id="<n7@x>", sender="ann@x.org", to="me@x.org", date=1_700_000_500, body="new question")
+    watch_env.add_row("[Gmail]/Sent Mail", uid="8", message_id="<s8@x>", sender="me@x.org", to="ann@x.org", date=1_700_000_600, body="my answer")
     lock = sqlite3.connect(watch_env.db_path); lock.execute("BEGIN EXCLUSIVE")
     try:
         assert watch_env.watcher.handle_trigger("timer") == 0
