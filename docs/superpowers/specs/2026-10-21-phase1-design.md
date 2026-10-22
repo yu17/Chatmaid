@@ -1,291 +1,328 @@
-# chatmaid phase 1: core store, email connector, WeChat one-shot import
+# chatmaid phase 1: headless daemon, email connector, local web UI
 
-Status: **DRAFT, not approved.** Written 2026-10-21 from the owner's two messages
-(2026-09-27 brief, 2026-10-21 follow-up) plus the research in `docs/research/`.
-Nothing in this document has been built. Section 9 lists the decisions only the
-owner can make; section 10 lists the calls I made so they can be checked.
+Status: **DRAFT v2, not approved.** Rewritten 2026-10-21 after the owner's
+answers to v1. Nothing has been built. Section 11 lists what the owner still
+has to decide; section 12 lists the calls I made so they can be checked.
+Research behind this document: `docs/research/`.
 
 ## 1. Intent
 
-chatmaid watches the owner's messaging platforms (WeChat first, then Discord and
-email), reads conversation history, and suggests the owner's next message. A
-local LLM handles everything that touches private content; online LLMs are
-called per request for revision, refinement, or heavier reasoning, and only see
-redacted or explicitly approved material. The user-facing side will be a unified
-remote-control interface or an overlay/helper window on the chat apps.
+chatmaid is a headless daemon that watches the owner's messaging platforms
+(email now, WeChat once its history is extracted, Discord later), keeps an
+index of who the owner talks to and what has been said, and for each incoming
+message decides whether a reply is needed and drafts one in the owner's own
+style. A local model handles everything that touches private content. Cloud
+models are used per request for refinement and heavier reasoning and only see
+pseudonymized material the owner has agreed to send (Pattern A in
+`hybrid-llm-architecture.md`). A small local web UI, reachable from the
+owner's phone through their private proxy, shows drafts and lets the owner
+approve, edit or dismiss them.
 
-Phase 1 is the foundation: a local message store with a normalized model, the
-first read-only connector (email via the owner's Evolution client), and the
-one-time import of the complete WeChat history. Reply suggestion, cloud
-refinement, Discord, and the UI come in later phases.
+Phase 1 delivers the daemon's two core routines, the email connector as the
+first data source, and the web UI. It does not send anything anywhere.
 
-## 2. Why now, and what success looks like
+## 2. Owner's decisions so far (theirs, verbatim in spirit)
 
-- The owner already has the data sources in place: a logged-in secondary WeChat
-  client on the MacBook, nine mail accounts cached by Evolution on the
-  workstation, and a 24 GB GPU for local inference.
-- Success for phase 1: the owner can open one local store and see their complete
-  WeChat history (text, images, videos, link cards, files, stickers) and their
-  mail history side by side, kept current for mail, with nothing having been
-  written to WeChat, Evolution, or any mail server.
+- The MacBook is not reachable now; WeChat extraction waits. Nothing in phase 1
+  may block on it.
+- WeChat history is 20.7 GB over about ten years. It may reside fully on
+  `/mnt/Apps`, and the owner keeps their own backup of it. Only the last one to
+  two years need to sit next to the running daemon; older history is reached
+  only on demand. Full history serves two purposes: learning and summarizing
+  the owner's talk style, and a persistent memory that stays coherent across
+  chat sessions. Reply generation uses recent context only.
+- Email accounts in scope: b5a7v1, jiaqi.yu1, jxy618.case, yjq17, yu17.fishy.
+  The owner uses "jiaqi" as the main alias on b5a7v1 and "fishy" occasionally;
+  one account may carry several identities.
+- Python 3.14 with uv.
+- All data lives in one folder inside this project on `/mnt/Apps`, laid out
+  for easy backup. No duplication: no copy of the mail. No encryption for now.
+- Cloud models through the `claude` and `codex` command-line tools; local
+  models through LM Studio, with the owner's `ccx` launcher as a reference.
+  Pattern A (local core, pseudonymized consent-gated cloud refine) is accepted.
+- Start with the daemon's initialization and reply-draft flow, then the email
+  connector, then a simple local web frontend.
 
-## 3. Goals, non-goals, anti-goals
+## 3. How the owner's suggestions were evaluated
+
+Adopted as stated: the daemon with two routines; Pattern A; LM Studio as the
+local server; a web UI loadable from the phone; no full-history database.
+
+Adopted with a precise shape. "No database of full history" becomes a
+three-tier layout (section 5): the **archive** is the raw sources, kept once
+and never copied into chatmaid; the **index** is small and derived; the **hot
+window** holds only references and derived fields for recent messages, and
+message text is read from the source on demand. Nothing in the mail cache is
+duplicated. The WeChat archive is the one decrypted copy chatmaid produces
+later, which is also what the owner backs up.
+
+Adopted with an adjustment to order. The daemon's initialization has nothing
+to digest without a connector, and email is ready today while WeChat is not.
+So the email connector is built alongside the daemon core as its first source,
+and the reply-draft flow and the UI follow. The owner's order is kept in
+spirit: daemon first, UI last.
+
+Adopted with caveats. `claude -p` and `codex exec` work as cloud backends and
+use the owner's existing subscriptions, so no API keys are needed. Both must be
+run so they cannot touch local files: `claude -p --bare --tools "" ...` and
+`codex exec --ephemeral -s read-only -C <empty dir> ...`. Both add a few
+seconds of process start-up per call, which is fine for on-demand refinement
+and not for the per-message hot path. Both sit behind one provider interface so
+API-key backends can be added later. Note that in codex, `-p` selects a
+profile; the non-interactive mode is `codex exec`.
+
+`ccx` is the owner's launcher for Claude Code on alternate backends, including
+LM Studio on port 40090 with the Anthropic Messages API. Two things carry over:
+the LM Studio facts it documents (authenticated server, just-in-time model
+loading with a cold start of about a minute, prompt-cache stability), and the
+option of running Claude Code's agent loop on a local model for heavy offline
+jobs such as the initial digest. The daemon's per-message path calls LM Studio
+directly for latency; `ccx lmstudio -p` is an optional runner for batch
+analyses, not a dependency.
+
+Not adopted. gpt-oss-120b as a default: at 63 GB it only runs with heavy CPU
+offload. The existing nomic embedding model as the only embedder: it is
+English-centric and the corpus is largely Chinese (section 7).
+
+## 4. Goals, non-goals, anti-goals
 
 Goals
 
-- One normalized store for messages from every platform, queryable by
-  conversation and time, with media stored as files and referenced by the store.
-- WeChat: complete one-shot import, including media and stickers, from a
-  migrated desktop client database.
-- Email: read-only access to history and new mail through Evolution's own
-  accounts and cache, with no second sign-in.
-- Everything stays on the workstation; cloud models are out of scope for phase 1.
+- A daemon with an initialization routine (digest the sources into the index)
+  and two live routines: handle an incoming message, and record a message or
+  thread the owner initiated.
+- Email connector reading Evolution's cache read-only for the five accounts,
+  with new-mail events from Evolution's D-Bus signal.
+- Drafts for incoming mail that needs a reply, in the owner's style, from a
+  local model, with an optional pseudonymized cloud refine the owner triggers.
+- A local web UI listing pending drafts and conversations, usable from a phone.
+- Everything resumable and idempotent so initialization can be re-run.
 
 Non-goals (phase 1)
 
-- Sending or drafting on any platform.
-- Ongoing WeChat sync and notifications (depends on where the always-on client
-  lives; decision deferred, see 9.2).
-- Discord. The compliant path is an official bot in servers the owner controls,
-  which cannot see DMs; it needs its own design.
-- Reply suggestion and the overlay or remote UI.
+- Sending, saving drafts into Evolution, or any write to a source.
+- WeChat import (ready to slot in once the archive exists; the one-shot plan is
+  in `wechat-one-shot-extraction.md`).
+- Discord.
+- Automatic cloud calls. Every cloud call is owner-triggered in phase 1.
 
-Anti-goals (would make this a failure even if it "works")
+Anti-goals
 
-- Any write to WeChat data, Evolution data, or a mail server before the owner
-  has explicitly approved that specific test.
-- Any protocol-level or hook-based WeChat tooling on the owner's main account
-  (high ban risk).
-- Chat content or decrypted databases committed to the repository or sent to a
-  cloud service.
-- A Windows VM that grows into a second workstation. If a VM is used it must stay
-  minimal and disposable.
+- Writing to WeChat data, Evolution data, or mail servers before the owner has
+  approved that specific test.
+- Copying mail bodies or the Evolution cache into chatmaid's data.
+- Sending raw message text to a cloud model, or letting a cloud CLI read local
+  files.
+- Chat content, keys or tokens in the repository.
 
-## 4. Constraints
+## 5. Data layout and the three tiers
 
-- WeChat primary login is an unrooted vivo X Fold 6. WeChat allows one phone,
-  one PC seat (Windows, macOS and Linux share it), and one tablet online at once.
-  Logging the same account into a Windows VM will log out the MacBook client.
-- A secondary desktop login holds only recent messages. Complete history must be
-  pushed from the phone with 迁移/导出到电脑 (migration), which merges into the
-  desktop client's live database. The 备份 (backup) blob is encrypted with a key
-  held inside the Android app; it is not recoverable on an unrooted phone.
-- Migration drops images and videos not opened or downloaded in the last 7 days
-  (Huawei support, verbatim in `wechat-one-shot-extraction.md`), and excludes
-  call logs and official-account chats.
-- Desktop WeChat 4.x databases are SQLCipher 4 (WCDB). Keys live only in process
-  memory. Linux: readable from `/proc/<pid>/mem`. macOS: readable with a
-  memory-reading tool while WeChat runs, SIP stays on; tool support for 4.1.15
-  is unverified. Windows: broke at 4.1.13.65, so a Windows route must pin
-  ≤4.1.12.
-- The workstation has no QEMU/libvirt installed and no WeChat Linux client.
-  `/mnt/Apps` is 91% full (about 179 GB free). The MacBook has 96 GB free and
-  its whole WeChat data tree is 1.6 GB today (recent messages only); the
-  post-migration size is unknown until the owner reads it off the phone
-  (see 9.2).
-- Evolution 3.62.1 is running with 9 cached mail accounts (5 IMAP, 3 Exchange
-  Web Services, 1 Microsoft 365) and a 17 GB cache. The local "On This
-  Computer" store is a 100 MB Maildir holding 307 sent messages and nothing
-  else. libcamel and EDataServer are importable from Python through GObject
-  introspection.
-- Owner's rule: read-only first; no write or edit test begins without telling
-  the owner and getting a go.
-
-## 5. Architecture (phase 1 slice)
+One folder, `data/` at the project root, gitignored, backed up by copying it.
 
 ```
- WeChat desktop client (Mac now; VM or Linux later)   Evolution (workstation)
-   db_storage/*.db (SQLCipher)  msg/ media              ~/.cache/evolution/mail/<acct>/
-          │ one-shot: key → decrypt to a working copy          folders.db + body cache
-          ▼                                                     │ read-only; D-Bus Newmail
-   wechat importer ──────────────┐            ┌──────────────── signal or inotify
-                                 ▼            ▼
-                        normalized message store (SQLite)
-                        messages · conversations · contacts · media index
-                                 │
-                        media files on disk (decoded images, voice→mp3,
-                        video, files, stickers), referenced by hash
-                                 │
-                      (phase 2) local LLM: embeddings, reply drafts
+data/
+  config.toml              accounts in scope, owner identities and aliases,
+                           policies, LM Studio endpoint; token in a separate
+                           file with mode 600
+  index.sqlite             the index + hot window + drafts + audit log
+                           (sqlite-vec for embeddings)
+  archive/wechat/<acct>/   the one decrypted copy of WeChat DBs and decoded
+                           media, produced later by the one-shot import
+  logs/
 ```
 
-Core model (one table set, platform-agnostic): `conversation` (platform,
-platform_id, kind: dm/group/mailthread, title), `contact` (platform, platform_id,
-display names, aliases), `message` (conversation, sender, sent_at, kind: text,
-image, video, voice, file, sticker, link, system, email; body text; quoted or
-in-reply-to reference; raw payload kept as JSON for anything lossy), `media`
-(sha256, path, mime, width/height/duration, source reference), `message_media`
-(link table). Each connector is an importer that maps its source into this
-model and is idempotent on re-run.
+Tier 1, archive (cold, large): the raw sources. WeChat: `data/archive/wechat`
+(about 20 GB, the owner's backup target). Email: Evolution's own cache under
+`~/.cache/evolution/mail/<uid>/`, read in place and never copied.
 
-## 6. WeChat one-shot import
+Tier 2, index (warm, small): derived data only.
 
-The owner does the migration; the automation does the extraction. Full
-procedure and alternatives are in `docs/research/wechat-one-shot-extraction.md`.
+- `identity` and `contact`: one contact may own several identities (email
+  addresses, later WeChat ids). The owner is a contact with all five account
+  addresses and the aliases "jiaqi" and "fishy". Merging is by rule plus owner
+  confirmation in the UI.
+- `conversation`: per thread or chat: participants, platform refs, a running
+  summary, a timeline of notable events, tier (family, work, finance, casual,
+  bulk), and whether it is tracked for replies.
+- `memory`: facts and events extracted from history with provenance (source,
+  message ref, date), consolidated over time. This is the persistent memory
+  that keeps sessions coherent.
+- `style_profile`: the owner's writing style per language and per
+  conversation tier, built from the owner's own messages, refreshed on a
+  schedule, with example snippets referenced, not copied.
+- `embedding`: vectors over conversation summaries, memories, and hot-window
+  messages, for retrieval.
+- `draft`: generated drafts, their context snapshot, the owner's action
+  (approved, edited, dismissed, ignored), and the edited text when given.
+- `cloud_call`: audit log of every cloud request: backend, pseudonymized
+  payload, consent decision, response hash, time.
 
-Recommended route: **MacBook first.** It already holds a live 4.1.15 login and
-needs nothing installed on the workstation. Steps:
+Tier 3, hot window: `message` rows for the last N months (owner: one to two
+years) of tracked conversations, holding sender, time, kind, a short preview,
+derived labels, and a source reference. The full text is read from the source
+on demand through the connector, so nothing is duplicated. Older messages
+leave the hot window at rollover and remain reachable through the history
+lookup tool.
 
-1. Owner, on the phone: open the important chats so media is downloaded (7-day
-   rule), then `我 → 设置 → 聊天 → 聊天记录迁移与备份 → 迁移 → 迁移到电脑微信`
-   (or on the 2025 UI `设置 → 通用 → 聊天记录管理 → 导入与导出 → 导出到电脑`),
-   choose all chats, confirm the pop-up on the Mac. Same Wi-Fi, WeChat open and
-   logged in on the Mac.
-2. Before that, a 10-minute test decides the route: with WeChat running on the
-   Mac, run a memory key tool (wxkey / wechat-cli) and check it can open
-   `message_0.db`. If it fails on 4.1.15, fall back to the Linux client route
-   (install official 4.1.13, log in, which displaces the Mac login, extract the
-   key from process memory, then migrate to it). Windows VM is the last resort.
-3. Automation: quit WeChat, copy `db_storage/` and `msg/` to the workstation
-   over SSH, decrypt into a working copy (never the live directory), parse
-   `Msg_<md5>` tables across `message_N.db` shards, resolve media through
-   `hardlink.db` and `message_resource.db`, decode `.dat` images with the
-   per-account image key, SILK voice to mp3, `wxgf` via ffmpeg, and import.
-4. Stickers (type 47): use the local `emoticon.db` and cache first; for the
-   rest, download `encrypturl` and decrypt with the message's `aeskey`
-   (AES-128-ECB), or fetch `cdnurl`; store-pack stickers that cannot be
-   downloaded keep their product id and thumbnail only.
-5. Completeness check: message count jumps versus the pre-migration baseline,
-   oldest message in the longest chat matches the phone, 10 random media items
-   per type open, group senders resolve. Re-run migration once a day later to
-   sweep anything missed.
+History lookup on demand: a `search_history(query, contact, date range)` tool
+that queries the archive directly (Evolution `folders.db` plus body files;
+WeChat tables and FTS later) and returns snippets with references. The model
+calls it only when the context header is not enough.
 
-What this touches on the owner's devices: the migration writes into the Mac's
-WeChat database (the owner's own action); the key tool runs a re-signed copy
-of WeChat.app and reads its memory (no data modified, but third-party code runs
-on the Mac). Both need the owner's go.
+## 6. The daemon
 
-## 7. Email connector (read-only, through Evolution)
+Single process, `chatmaid` CLI with subcommands, asyncio, running as the
+owner's user. Phase 1 runs it in the foreground; a systemd user unit comes
+later.
 
-Details and sources are in `docs/research/evolution-email-access.md`. Verified
-on the workstation on 2026-10-21: Evolution 3.62.1 is running; nine accounts
-are cached under `~/.cache/evolution/mail/<uid>/`, each with a `folders.db`
-(SQLite tables `keys`, `folders`, and one `messages_<folder_id>` per folder)
-and raw RFC822 body files under `folders/<Name>/cur/<hh>/<imap-uid>`; the
-Exchange and Microsoft 365 accounts use the same cache format as IMAP, so no
-OAuth work is needed to read them; Evolution's mail-notification plugin has
-D-Bus signalling enabled; `org.gnome.Evolution` is on the session bus.
+Routine A, `init` (bootstrap, resumable, batch): for each connector, walk the
+source from oldest to newest in chunks; create identities and conversations;
+summarize each conversation in passes (chunk summaries, then a rolling
+summary); extract memory facts with provenance; fill the hot window; build
+the style profile from the owner's own messages; compute embeddings. Progress
+is checkpointed per conversation so interruption and re-runs are safe. All
+model calls go to LM Studio. Expect this to run for hours on the mail
+corpus; it is a background job with a progress view in the UI.
 
-Read path. For each account in scope, open `folders.db` with
-`file:...?mode=ro`, short autocommit SELECTs and a busy timeout. Never
-read-write, never `immutable=1` on the live file, never a long transaction
-(Evolution's writer gives up after about 15 seconds of lock). Enumerate
-`folders`, read each `messages_<id>` table (uid, flags, dates, subject, from,
-to, cc, thread reference, labels, preview), parse the body file with Python's
-`email` package when it exists, and map into the normalized model: a mail
-thread is a conversation (grouped by References/In-Reply-To, falling back to
-normalized subject), each address is a contact, attachments become media.
-Import is idempotent on (account uid, folder, imap uid). Messages without a
-cached body are stored header-only and marked so.
+Routine B, `on_incoming(message)`:
 
-Completeness depends on Evolution's "Download messages for offline usage"
-setting: with it on, bodies for everything within the age limit are on disk;
-with it off, only opened mail is cached and files expire after 7 days. The
-probe shows 9 of 14 mail-related sources have it on. Enabling it for the
-accounts in scope is a change the owner makes in Evolution's account settings.
+1. Triage without a model where possible: bulk headers (List-Unsubscribe,
+   Precedence), known-bulk senders, the conversation's tier. Then a small
+   local model classifies into needs-reply, informational, bulk/ad, system.
+   Everything is recorded; only needs-reply continues.
+2. Build the context header: contact card and relationship summary,
+   conversation summary and recent hot-window messages, relevant memories
+   (vector search), style profile for the language and tier, and the message
+   itself read from the source.
+3. Draft with the local reply model: one to three candidates, with a one-line
+   rationale each. The model may call `search_history` if the header is thin.
+4. Store the draft, notify the UI. If the owner asks for a cloud refine, run
+   the Pattern A hop: pseudonymize (names, addresses, phone numbers, amounts if
+   flagged) with a reversible map, show the exact payload, send on consent,
+   re-hydrate, store both versions and the audit row.
 
-Notification path. Subscribe on the session bus to the `Newmail` signal
-(interface `org.gnome.evolution.mail.dbus.Signal`, path
-`/org/gnome/evolution/mail/newmail`), which carries folder name, count, the
-message uid, sender and subject. By default it fires for Inbox folders only.
-Fallback: inotify on `folders.db` with debouncing and a diff by max uid. Both
-only work while Evolution runs, which matches how the owner uses it.
+Routine C, `on_owner_message(message)`: fired when the owner sends or starts a
+thread (email: Sent folders of the five accounts; WeChat later: own messages).
+Update the conversation summary and tier, extract memories, add a style
+sample, and if a draft existed for that thread, record what the owner actually
+sent as the accept/edit/reject signal.
 
-Later draft and send (phase 2, only after approval). Run
-`evolution 'mailto:...?subject=...&In-Reply-To=...&References=...&body=...'`
-to open a prefilled, correctly threaded compose window in the running
-Evolution; the owner edits and clicks Send, and Evolution keeps its own Sent
-and Drafts bookkeeping. No automated send and no draft creation in phase 1.
+Routine D, `watch`: subscribes to Evolution's `Newmail` D-Bus signal, with an
+inotify fallback on `folders.db`, and polls Sent folders for routine C;
+debounces, resolves the message by (account, folder, uid), and dispatches B or
+C. Maintenance jobs: nightly hot-window rollover, memory consolidation, style
+refresh.
 
-Not chosen. A libcamel client from Python is possible but needs a
-`CamelSession` subclass with six vfunc overrides, its own cache directories,
-and its own authentication; plain read-only IMAP would duplicate Evolution's
-connections and need OAuth tokens through EDS or GNOME Online Accounts. Both
-stay as plan B if a body is ever needed that the cache does not hold.
+## 7. Models and the cloud hop
 
-## 8. Storage, privacy and operations
+Local, through LM Studio at `127.0.0.1:40090` (authenticated; the owner
+provides the token). Models already downloaded: Qwen3.5-35B-A3B and 9B,
+Gemma 4 26B-A4B, GLM-4.7-Flash 30B-A3B, GLM-4.6V-Flash 9B, Qwen3-4B,
+gpt-oss-120b. Roles:
 
-- Store and media live outside the repository under a path the owner chooses
-  (see 9.5); `.gitignore` already excludes `data/` and database files.
-- Decrypted WeChat databases and extracted keys are treated as secrets: kept
-  only in the data directory, never logged, never committed.
-- All connectors open sources read-only (SQLite `mode=ro`, `immutable=1` where
-  safe; IMAP would use EXAMINE and BODY.PEEK if ever used).
-- Runs as the owner's user on the workstation. Phase 1 ships a re-runnable
-  incremental import command plus a foreground `watch` command that subscribes
-  to Evolution's new-mail signal (inotify fallback) and imports as mail
-  arrives. No systemd unit or background service until phase 2.
-- Acceptance is checked with a minimal read CLI: list conversations, show one
-  conversation, search text. Without it only someone writing SQL could verify
-  the deliverable.
+- Triage, PII tagging, chunk summaries: Qwen3-4B (fast, always loadable).
+- Reply drafting and rolling summaries: Qwen3.5-35B-A3B by default (Chinese
+  and English, fast MoE); Gemma 4 26B-A4B and GLM-4.7-Flash as alternatives
+  to compare on a private eval set built from the owner's own threads.
+- Embeddings: a multilingual model is needed for Chinese; candidates are
+  bge-m3 or Qwen3-Embedding-0.6B, run either in LM Studio or in-process. The
+  present nomic model stays for English-only experiments.
+- LM Studio loads models just in time with a cold start of about a minute and
+  an idle unload; the daemon tolerates that and can pin models with `lms load`.
 
-## 9. Decisions the owner must make
+Cloud, owner-triggered only, through a provider interface with two initial
+backends: `claude -p --bare --tools "" --no-session-persistence
+--output-format json --json-schema <schema> --model <m>` and `codex exec
+--ephemeral -s read-only -C <empty dir> --output-schema <file> -m <m>`. Both
+see only the pseudonymized payload. API-key backends can be added later
+behind the same interface.
 
-Ordered by how much they change what gets built.
+## 8. Email connector
 
-1. **WeChat one-shot route.** Mac-first (recommended), Linux client, or Windows
-   VM. Mac-first needs: permission to run a key-extraction tool on the Mac with
-   WeChat open, and the owner to run the migration from the phone.
-2. **Expected WeChat data volume.** On the phone, `设置 → 通用 → 存储空间`
-   shows the chat-data size. Under about 20 GB the import is a plain
-   copy, decrypt, import sequence; at 50 GB or more it needs staged copying
-   with cleanup or a different volume, since the workstation holds the
-   encrypted copy, a decrypted working copy, and decoded media (roughly two to
-   three times the source).
-3. **Where the always-on WeChat client will live later** (affects sending and
-   live sync, not phase 1). Windows VM (owner's stated preference; needs QEMU
-   install, a Windows 11 IoT LTSC evaluation image or a licensed one, a
-   ≤4.1.12 build, and accepts displacing the Mac login) versus the MacBook
-   (AppleScript sending, no VM) versus the Linux client (xdotool sending,
-   immature). Can be deferred.
-4. **Email accounts in scope, and offline download.** All nine cached accounts
-   or a subset (the largest single cache is 12 GB). Exchange and Microsoft 365
-   accounts are cached in the same format, so the cache route covers them
-   without OAuth work. For full bodies, the owner enables "Download messages
-   for offline usage" on the in-scope accounts in Evolution; otherwise the
-   connector sees bodies only for mail opened in the last 7 days.
-5. **Language and stack.** My call is Python 3.14 with uv (see 10); confirm or
-   override.
-6. **Data directory and encryption at rest.** Where the store and media go
-   (the `/mnt/Apps` volume is 91% full). My default for encryption is
-   filesystem-level (the owner's LUKS, fscrypt or gocryptfs; the code writes
-   plaintext). Application-level encryption (SQLCipher store, encrypted media
-   files) changes every database open and all media handling and is cheap to
-   retrofit for the database but not for media, so say now if it is required.
-7. **Go/no-go for each write-capable step**, which I will request individually:
-   phone migration, key tool on the Mac, enabling offline download in
-   Evolution, and later anything that drafts or sends.
+Read-only reader over Evolution's cache, verified on the workstation on
+2026-10-21 (details in `evolution-email-access.md`):
 
-## 10. Calls I made (check these while reading)
+- Source of truth per account: `~/.cache/evolution/mail/<uid>/folders.db`
+  (tables `folders` and `messages_<folder_id>`) and raw RFC822 bodies under
+  `folders/<Name>/cur/<hh>/<uid>`. Opened with `file:...?mode=ro`, short
+  autocommit SELECTs, a busy timeout, never `immutable=1`, never a long
+  transaction, never read-write.
+- Coverage today is complete: every indexed message in all five accounts has a
+  cached body (counts checked per account). Three IMAP accounts have offline
+  download on with no age limit; the Microsoft 365 and Exchange accounts do
+  not, so their cached bodies could expire later. Enabling the setting on
+  those two in Evolution is an owner action and is recommended, not required.
+- Identity: the five accounts' addresses and the aliases map to the owner
+  contact; a message is "owner-initiated" if its From matches any of them or
+  it sits in a Sent folder.
+- Threads become conversations via References and In-Reply-To with a subject
+  fallback. Bulk mail is tagged from headers at import time.
+- The local Maildir Sent folder (307 messages) is included through Python's
+  `mailbox` module since it is all the local store contains.
+- Events: `Newmail` signal on `org.gnome.evolution.mail.dbus.Signal`, which
+  by default fires for Inbox folders only; inotify fallback; Sent-folder
+  polling for routine C.
+- Later, draft hand-off: `evolution 'mailto:...'` with In-Reply-To and
+  References opens a prefilled compose window in the running Evolution; the
+  owner sends. Out of phase 1.
 
-- Python 3.14 + uv for the codebase. Reason: every relevant building block is
-  Python-first (SQLCipher bindings, zstd, SILK decoders, python-gobject for
-  Evolution, LLM tooling), and uv is already installed.
-- SQLite for the store, with sqlite-vec later for embeddings, so one file holds
-  messages and vectors.
-- Media stored content-addressed by sha256 with the original WeChat path kept as
-  metadata, so re-imports deduplicate.
-- Raw source payloads kept as JSON beside the normalized fields, so a later
-  parser fix never requires re-extracting from WeChat.
-- Phase 1 excludes all sending and all cloud calls, matching the owner's
-  read-only rule.
-- Email scope defaults to all nine cached accounts plus the local Maildir Sent
-  folder (307 messages, read with Python's `mailbox` module), because that is
-  all the local store contains.
-- A foreground `watch` command rather than a service, and a minimal read CLI
-  as the acceptance tool (section 8).
-- Encryption at rest left to the filesystem unless the owner says otherwise
-  (section 9.6).
-- WeChat import is planned Mac-first with the Linux client as a branch taken
-  only if the key test fails. The Linux branch has an untested gap: research
-  confirms the per-account image key (needed to decode `.dat` images) only via
-  the macOS tool; whether the Linux key tool yields it is unknown and needs a
-  spike before that branch is relied on.
+## 9. Web UI
 
-## 11. What is left to the builder
+A small FastAPI app bound to localhost, server-rendered pages with minimal
+JavaScript, mobile-first layout, exposed to the phone only through the owner's
+private proxy (no auth of its own in phase 1; the proxy is the boundary).
+Views: pending drafts (approve, edit, dismiss, "refine with cloud" with the
+payload preview), conversation view with summary and recent messages, contact
+and identity merge, init progress, cloud audit log. Approve in phase 1 means
+"record approval"; nothing is sent.
 
-- Exact table DDL and migration tooling.
-- Choice of SQLCipher binding and zstd library.
-- Parser coverage for the type 49 appmsg subtypes (link, file, quote, forwarded
-  records, mini-program) beyond text extraction.
-- Import CLI shape and progress reporting.
+## 10. Build order
+
+1. Core: package skeleton, config, index schema, connector interface, LM
+   Studio client, history lookup tool, `chatmaid init` over email.
+2. Email connector: reader, Sent detection, Newmail subscription, `watch`.
+3. Reply-draft flow: triage, context header, drafting, draft store, cloud
+   provider interface with `claude` and `codex` backends and the pseudonymizer.
+4. Web UI.
+5. WeChat importer, when the archive exists.
+
+## 11. Decisions the owner must make
+
+1. **Hot window length:** one year or two. (Affects nothing structural; my
+   default is one year with summaries covering the rest.)
+2. **LM Studio access:** provide the server's API token for the data config,
+   or turn off "Require Authentication" for localhost.
+3. **Embedding model for Chinese:** allow downloading bge-m3 or
+   Qwen3-Embedding-0.6B (a few hundred MB to 1.2 GB).
+4. **Cloud default:** which backend and model to offer first in the UI
+   (`claude -p` with a given model, or `codex exec`), and the consent rule:
+   always show the payload and ask (my default), or auto-send for casual-tier
+   threads.
+5. **Evolution offline download** on yjq17 and jiaqi.yu1: optional, owner
+   action in Evolution's account settings.
+6. **Approve this document** so the implementation plan can be written. Any
+   write-capable test still gets its own go/no-go later.
+
+## 12. Calls I made (check these)
+
+- Three-tier layout with no copied mail: the index holds references and
+  derived fields; text is read from the source on demand.
+- Email built together with the daemon core as its first source; UI last.
+- Cloud CLIs run tool-less and stateless and sit behind a provider interface.
+- `ccx lmstudio` kept as an optional batch runner, not part of the hot path.
+- Qwen3.5-35B-A3B as the default drafting model, Qwen3-4B for triage, pending
+  a private eval.
+- Initialization is a resumable pipeline with checkpoints, not an agent loop.
+- Triage uses header rules before any model call.
+- Sent folders define "owner-initiated" for email.
+- FastAPI, server-rendered, localhost-only, proxy as the security boundary.
+- Foreground process in phase 1, systemd user unit later.
+
+## 13. Left to the builder
+
+- Exact DDL, migration tooling, chunking and summarization prompts.
+- Pseudonymizer implementation (Presidio with a Chinese model plus a
+  contact-book deny-list and a small-model second pass) and the placeholder
+  format.
+- Eval set construction from the owner's threads and the model comparison.
+- UI framework details and styling.
