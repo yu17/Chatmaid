@@ -6,10 +6,8 @@ ends with a dated reference list.
 
 | File | Question it answers |
 |------|---------------------|
-| [wechat-access.md](wechat-access.md) | How to get complete WeChat history (incl. media), live notifications, and optionally send messages, given an unrooted Android primary device |
 | [hybrid-llm-architecture.md](hybrid-llm-architecture.md) | Existing local-plus-cloud LLM architectures and building blocks; candidate patterns for this project |
 | [prior-art.md](prior-art.md) | Existing multi-platform chat assistants and bridges (OpenClaw, Wechaty, Chinese bot frameworks, Matrix bridges, email and Discord options) worth borrowing from |
-| [wechat-one-shot-extraction.md](wechat-one-shot-extraction.md) | (2026-10-21) Step-by-step one-time full-history extraction: migration vs backup, key extraction per desktop OS, stickers, minimal Windows VM, login-seat limits |
 | [evolution-email-access.md](evolution-email-access.md) | (2026-10-21) Reusing the owner's Evolution accounts and cache for read-only mail access, notifications, and approved drafting/sending |
 
 ## Conclusions across the three notes (2026-09-27)
