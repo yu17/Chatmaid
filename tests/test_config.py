@@ -45,7 +45,6 @@ def test_defaults_mirror_example_config():
 
 def test_draft_and_cloud_defaults(tmp_path):
     cfg = load(Path("config.example.toml"), project_root=tmp_path)
-    assert cfg.draft.model_role == "main"
     assert cfg.draft.candidates == 2
     assert cfg.draft.recent_messages == 12
     assert cfg.draft.memories == 8
@@ -56,19 +55,46 @@ def test_draft_and_cloud_defaults(tmp_path):
     assert cfg.cloud.claude_model == ""
     assert cfg.cloud.timeout_s == 300
     assert cfg.cloud.redact_amounts is False
-    assert cfg.draft_model == cfg.lmstudio.model_main
 
 
-def test_heavy_role_selects_heavy_model(tmp_path):
+def test_single_model_think_and_temperature_defaults(tmp_path):
+    cfg = load(Path("config.example.toml"), project_root=tmp_path)
+    assert cfg.lmstudio.model == "qwen3.5-122b-a10b"
+    assert cfg.lmstudio.think is True
+    assert cfg.lmstudio.temperature == 0.6
+
+
+def test_model_think_and_temperature_are_configurable(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[lmstudio]\nmodel = "qwen/qwen3.5-35b-a3b"\nthink = false\ntemperature = 0.7\n')
+    cfg = load(p, project_root=tmp_path)
+    assert (cfg.lmstudio.model, cfg.lmstudio.think, cfg.lmstudio.temperature) == (
+        "qwen/qwen3.5-35b-a3b", False, 0.7
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    ['[lmstudio]\nmodel_small = "x"\n', '[lmstudio]\nmodel_main = "x"\n', '[lmstudio]\nmodel_heavy = "x"\n'],
+)
+def test_stale_model_role_keys_rejected(tmp_path, text):
+    p = tmp_path / "config.toml"
+    p.write_text(text)
+    with pytest.raises(ConfigError, match="lmstudio.model"):
+        load(p, project_root=tmp_path)
+
+
+def test_stale_draft_model_role_rejected(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text('[draft]\nmodel_role = "heavy"\n')
-    cfg = load(p, project_root=tmp_path)
-    assert cfg.draft_model == cfg.lmstudio.model_heavy
+    with pytest.raises(ConfigError, match="model_role"):
+        load(p, project_root=tmp_path)
 
 
-def test_invalid_model_role_rejected(tmp_path):
+@pytest.mark.parametrize("text", ['[lmstudio]\nthink = "yes"\n', '[lmstudio]\ntemperature = "hot"\n'])
+def test_think_must_be_bool_and_temperature_a_number(tmp_path, text):
     p = tmp_path / "config.toml"
-    p.write_text('[draft]\nmodel_role = "huge"\n')
+    p.write_text(text)
     with pytest.raises(ConfigError):
         load(p, project_root=tmp_path)
 

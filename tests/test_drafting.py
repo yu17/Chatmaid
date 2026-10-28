@@ -30,8 +30,7 @@ def test_draft_returns_candidates(digested_env):
         digested_env.store, digested_env.connector, llm, cfg, CTX, sender_email="ann@x.org"
     )
     assert out == [Candidate("Yes", "r"), Candidate("Sure", "r")]
-    assert llm.calls[0]["grammar"] is False
-    assert llm.calls[0]["model"] == cfg.draft_model
+    assert llm.calls[0]["model"] == cfg.lmstudio.model
     assert llm.calls[0]["user"].startswith(CTX.render())
     assert f"Write {cfg.draft.candidates} candidate replies as the owner." in llm.calls[0]["user"]
 
@@ -94,5 +93,4 @@ def test_revise_includes_previous_and_comment(digested_env):
     assert user.startswith(CTX.render())
     assert "## Previous draft\nLong text" in user
     assert "## Owner's feedback\nmake it shorter" in user
-    assert llm.calls[0]["grammar"] is False
-    assert llm.calls[0]["max_tokens"] == 1024
+    assert llm.calls[0]["model"] == digested_env.config.lmstudio.model

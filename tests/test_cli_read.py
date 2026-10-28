@@ -86,15 +86,16 @@ def test_cli_init_reports_llm_error(fake_env, monkeypatch, capsys):
     assert "embedding model returned garbage" in capsys.readouterr().err
 
 
-def test_cli_llm_check_uses_grammar_mode(fake_env, monkeypatch, capsys):
+def test_cli_llm_check_builds_client_from_config(fake_env, monkeypatch, capsys):
     import chatmaid.cli as cli
 
     fake_env.config.lmstudio.token_file.write_text("tok\n")
     captured = {}
+    built = {}
 
     class Stub:
-        def __init__(self, *a, **k):
-            pass
+        def __init__(self, base_url, token, **k):
+            built.update(k, base_url=base_url, token=token)
 
         def list_models(self):
             return ["m"]
@@ -105,4 +106,10 @@ def test_cli_llm_check_uses_grammar_mode(fake_env, monkeypatch, capsys):
 
     monkeypatch.setattr(cli, "LMStudioClient", Stub)
     assert main(["--config", str(fake_env.config_path), "llm-check"]) == 0
-    assert captured["grammar"] is True and "reply: OK" in capsys.readouterr().out
+    assert "reply: OK" in capsys.readouterr().out
+    assert captured["model"] == fake_env.config.lmstudio.model
+    assert "grammar" not in captured and "max_tokens" not in captured
+    assert built == {
+        "base_url": fake_env.config.lmstudio.base_url, "token": "tok",
+        "timeout_s": 600, "think": True, "temperature": 0.6,
+    }

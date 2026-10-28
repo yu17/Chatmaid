@@ -36,20 +36,9 @@ class FakeLLM:
         user: str,
         model: str,
         json_schema: dict | None = None,
-        max_tokens: int = 1024,
-        temperature: float = 0.3,
-        grammar: bool = False,
     ) -> str:
         self.calls.append(
-            {
-                "system": system,
-                "user": user,
-                "model": model,
-                "json_schema": json_schema,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "grammar": grammar,
-            }
+            {"system": system, "user": user, "model": model, "json_schema": json_schema}
         )
         if self._failures > 0:
             self._failures -= 1

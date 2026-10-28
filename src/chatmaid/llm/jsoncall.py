@@ -53,30 +53,18 @@ def _missing(key: str):
     raise ValueError(f"missing required key {key!r}")
 
 
-def complete_json(
-    llm: LLM,
-    prompt: Prompt,
-    user: str,
-    model: str,
-    *,
-    grammar: bool,
-    max_tokens: int = 2048,
-) -> dict:
-    """One reasoning-free call whose reply is validated against the prompt schema.
+def complete_json(llm: LLM, prompt: Prompt, user: str, model: str) -> dict:
+    """One call whose reply is validated against the prompt schema.
 
-    Invalid JSON or a missing required key gets one retry that shows the model its reply.
+    The JSON shape is spelled out in the prompt because a thinking-off call cannot enforce the
+    schema (see LMStudioClient). Invalid JSON or a missing required key gets one retry that
+    shows the model its reply.
     """
-    if not grammar:  # no grammar: the model must be told the keys
-        user = f"{user}\n\nReply with exactly this JSON shape: {schema_skeleton(prompt.schema)}"
+    user = f"{user}\n\nReply with exactly this JSON shape: {schema_skeleton(prompt.schema)}"
     message = user
     for attempt in range(2):
         raw = llm.complete(
-            system=prompt.system,
-            user=message,
-            model=model,
-            json_schema=prompt.schema,
-            max_tokens=max_tokens,
-            grammar=grammar,
+            system=prompt.system, user=message, model=model, json_schema=prompt.schema
         )
         try:
             return validated(json.loads(raw), prompt.schema)

@@ -23,16 +23,14 @@ local_maildir_sent = "~/.local/share/evolution/mail/local/.Sent"
 [lmstudio]
 base_url = "http://127.0.0.1:40090/v1"
 token_file = "LMStudio_token.txt"
-model_small = "qwen/qwen3-4b-2507"
-model_main = "qwen/qwen3.5-35b-a3b"
-# optional; set to the model_main value to fall back to it
-model_heavy = "qwen3.5-122b-a10b"
+model = "qwen3.5-122b-a10b"  # the one local model: triage, summaries, drafts, style, tagging
+think = true                 # reasoning on; the JSON schema is enforced on every call
+temperature = 0.6            # sent with every call; overrides the model's LM Studio preset
 model_embedding = "text-embedding-qwen3-embedding-0.6b"
 embedding_dim = 1024
 timeout_s = 600
 
 [draft]
-model_role = "main"        # "main" or "heavy": which LM Studio model writes drafts
 candidates = 2             # 1..3 candidate replies per draft
 recent_messages = 12       # hot-window messages in the context header
 memories = 8               # memories per source (direct + vector) in the header

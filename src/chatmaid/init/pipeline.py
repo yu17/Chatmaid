@@ -21,7 +21,6 @@ log = logging.getLogger(__name__)
 
 LOCAL_ACCOUNT = "local"  # Maildir uids are not integers: never checkpointed
 INGEST_BATCH = 200  # messages per store transaction
-DIGEST_MAX_TOKENS = 2048
 
 
 @dataclass(frozen=True)
@@ -268,16 +267,8 @@ class InitPipeline:
             memories += n_memories
         return DigestStats(done, chunks, memories, failed)
 
-    def _complete_json(
-        self,
-        prompt: prompts.Prompt,
-        user: str,
-        model: str,
-        *,
-        grammar: bool,
-        max_tokens: int = DIGEST_MAX_TOKENS,
-    ) -> dict:
-        return complete_json(self.llm, prompt, user, model, grammar=grammar, max_tokens=max_tokens)
+    def _complete_json(self, prompt: prompts.Prompt, user: str, model: str) -> dict:
+        return complete_json(self.llm, prompt, user, model)
 
     def _digest_conversation(self, cid: int, opts: InitOptions) -> tuple[int, int]:
         store = self.store
@@ -302,20 +293,16 @@ class InitPipeline:
         summary: str = state.get("summary", "")
         events: list[dict] = list(state.get("events", []))
         memories = 0
+        model = self.cfg.lmstudio.model
         for i in range(start, len(chunks)):
             chunk = chunks[i]
-            # model_small is non-thinking: it takes the strict schema, and the empty-think
-            # prefill (grammar=False) makes it degenerate, so chunk calls use grammar=True.
-            out = self._complete_json(
-                chunk_prompt, render_messages(chunk), self.cfg.lmstudio.model_small, grammar=True
-            )
+            out = self._complete_json(chunk_prompt, render_messages(chunk), model)
             new_summary = out["summary"]
             if i > 0:
                 merged = self._complete_json(
                     rolling_prompt,
                     f"Previous summary:\n{summary}\n\nNew chunk summary:\n{new_summary}",
-                    self.cfg.lmstudio.model_main,
-                    grammar=False,
+                    model,
                 )
                 new_summary = merged["summary"]
             summary = new_summary

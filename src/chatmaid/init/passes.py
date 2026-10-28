@@ -17,7 +17,6 @@ MIN_STYLE_SAMPLES = 5
 STYLE_MAX_PER_LANGUAGE = 60
 STYLE_MIN_CHARS = 20
 STYLE_SAMPLE_CHARS = 1500
-STYLE_MAX_TOKENS = 1024
 EMBED_BATCH = 32
 # Enough newest owner messages to fill 60 per language even when many are short.
 _OWNER_SCAN = 2000
@@ -42,7 +41,7 @@ def run_style(
             group.append((ref.key(), text))
 
     prompt = prompts.load("style_profile")
-    model = pipeline.cfg.lmstudio.model_heavy
+    model = pipeline.cfg.lmstudio.model
     done: dict[str, int] = {}
     for language, samples in groups.items():
         if len(samples) < min_samples:
@@ -51,9 +50,7 @@ def run_style(
             f"{i}. {text[:STYLE_SAMPLE_CHARS]}" for i, (_, text) in enumerate(samples, start=1)
         )
         try:
-            out = pipeline._complete_json(
-                prompt, user, model, grammar=False, max_tokens=STYLE_MAX_TOKENS
-            )
+            out = pipeline._complete_json(prompt, user, model)
         except LLMError as e:
             log.warning("style profile for %s failed: %s", language, e)
             continue

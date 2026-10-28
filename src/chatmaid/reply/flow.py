@@ -107,7 +107,7 @@ class ReplyFlow:
         if msg.is_owner:
             return None
         t = triage_message(
-            self.llm, cfg.lmstudio.model_small, msg, store.conversation(conversation_id),
+            self.llm, cfg.lmstudio.model, msg, store.conversation(conversation_id),
             message_chars=cfg.draft.message_chars, now=self.now(),
             max_age_days=cfg.draft.max_age_days,
         )
@@ -176,15 +176,13 @@ class ReplyFlow:
         if conv is None or conv["summary"] is None or not msg.text.strip():
             return False  # the digest pass will cover it
         out = complete_json(
-            self.llm, prompts.load("chunk_summary"), render_messages([msg]),
-            cfg.lmstudio.model_small, grammar=True,
+            self.llm, prompts.load("chunk_summary"), render_messages([msg]), cfg.lmstudio.model
         )
         merged = complete_json(
             self.llm,
             prompts.load("rolling_summary"),
             f"Previous summary:\n{conv['summary']}\n\nNew chunk summary:\n{out['summary']}",
-            cfg.lmstudio.model_main,
-            grammar=False,
+            cfg.lmstudio.model,
         )
         events = json.loads(conv["events_json"]) if conv["events_json"] else []
         owner = store.owner_contact_id()
@@ -310,7 +308,7 @@ class ReplyFlow:
             # the whole message (ruling R19): redaction shortens URLs and addresses, so the
             # excerpt cut after redaction reaches further into the raw text than 1,500 chars
             tag_text = "\n".join([previous, comment or "", ctx.summary, ctx.message])
-            names = tag_persons(self.llm, self.cfg.lmstudio.model_small, tag_text)
+            names = tag_persons(self.llm, self.cfg.lmstudio.model, tag_text)
         except LLMError as e:
             log.warning("draft %s: person tagging failed (%s); using the deny list only", draft_id, e)
             names = []

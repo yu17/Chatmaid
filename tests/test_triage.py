@@ -47,7 +47,6 @@ def test_model_triage_parses(sample_message):
     assert t == Triage("needs_reply", "work", "r", "model", "small")
     assert "Subject: Hi" in llm.calls[0]["user"]
     assert "Conversation so far: (none)" in llm.calls[0]["user"]
-    assert llm.calls[0]["grammar"] is True
 
 
 def test_model_invalid_category_is_unknown(sample_message):

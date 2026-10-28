@@ -47,14 +47,14 @@ def rule_triage(
 def model_triage(
     llm: LLM, model: str, msg: NormalizedMessage, summary: str | None, *, message_chars: int
 ) -> Triage:
-    """Classify one message with the small model; unknown answers degrade safely."""
+    """Classify one message with the local model; unknown answers degrade safely."""
     user = (
         f"From: {msg.sender.name} <{msg.sender.email}>\n"
         f"Subject: {msg.subject}\n"
         f"Conversation so far: {summary or '(none)'}\n\n"
         f"{msg.text[:message_chars]}"
     )
-    out = complete_json(llm, prompts.load("triage"), user, model, grammar=True, max_tokens=256)
+    out = complete_json(llm, prompts.load("triage"), user, model)
     category, tier, reason = out["category"], out["tier"], out["reason"]
     if category not in CATEGORIES[:4]:
         category, reason = "unknown", f"model returned {category!r}"

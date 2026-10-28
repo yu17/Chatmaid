@@ -67,6 +67,13 @@ def register_scan(subparsers) -> None:
     p.set_defaults(handler=_scan_command)
 
 
+def _lmstudio_client(cfg, token: str) -> LMStudioClient:
+    lm = cfg.lmstudio
+    return LMStudioClient(
+        lm.base_url, token, timeout_s=lm.timeout_s, think=lm.think, temperature=lm.temperature
+    )
+
+
 def _llm_check_command(args: argparse.Namespace) -> int:
     cfg = load_config(Path(args.config))
     try:
@@ -74,16 +81,12 @@ def _llm_check_command(args: argparse.Namespace) -> int:
     except ConfigError as e:
         print(str(e), file=sys.stderr)
         return 1
-    client = LMStudioClient(cfg.lmstudio.base_url, token, timeout_s=cfg.lmstudio.timeout_s)
+    client = _lmstudio_client(cfg, token)
     try:
         for model_id in client.list_models():
             print(model_id)
         reply = client.complete(
-            system="Reply with the single word OK.",
-            user="ping",
-            model=cfg.lmstudio.model_small,
-            max_tokens=8,
-            grammar=True,  # grammar mode: what digest uses on model_small
+            system="Reply with the single word OK.", user="ping", model=cfg.lmstudio.model
         )
     except LLMError as e:
         print(f"llm-check failed: {e}", file=sys.stderr)
@@ -138,7 +141,7 @@ def _init_locked(args: argparse.Namespace, cfg) -> int:
         llm = _NoLLM()  # the client (and its token) is only built for passes that call a model
     else:
         try:
-            llm = LMStudioClient(cfg.lmstudio.base_url, read_token(cfg), timeout_s=cfg.lmstudio.timeout_s)
+            llm = _lmstudio_client(cfg, read_token(cfg))
         except ConfigError as e:
             print(str(e), file=sys.stderr)
             return 1
@@ -248,7 +251,7 @@ def _lookup_command(args: argparse.Namespace) -> int:
     llm = None
     if not args.no_vector:
         try:
-            llm = LMStudioClient(cfg.lmstudio.base_url, read_token(cfg), timeout_s=cfg.lmstudio.timeout_s)
+            llm = _lmstudio_client(cfg, read_token(cfg))
         except ConfigError as e:
             print(f"warning: {e}; falling back to metadata search only", file=sys.stderr)
     connector = None
@@ -312,7 +315,7 @@ def _open_flow(
     elif not need_llm:
         llm = _NoLLM()
     else:
-        llm = LMStudioClient(cfg.lmstudio.base_url, read_token(cfg), timeout_s=cfg.lmstudio.timeout_s)
+        llm = _lmstudio_client(cfg, read_token(cfg))
     accounts = load_accounts(cfg.email.evolution_config_dir, cfg.email.accounts)
     owner = OwnerIdentity.from_accounts(accounts, cfg.owner.extra_addresses, cfg.owner.aliases)
     connector = EvolutionConnector(cfg.email, accounts, owner)

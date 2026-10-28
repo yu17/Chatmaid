@@ -146,8 +146,8 @@ class Pseudonymizer:
 
 
 def tag_persons(llm: LLM, model: str, text: str) -> list[str]:
-    """Ask the small local model for person names; keep plausible ones that occur in `text`."""
-    reply = complete_json(llm, prompts.load("pii_tag"), text, model, grammar=True, max_tokens=256)
+    """Ask the local model for person names; keep plausible ones that occur in `text`."""
+    reply = complete_json(llm, prompts.load("pii_tag"), text, model)
     return [n for n in reply["persons"] if len(n) >= 2 and n in text]
 
 

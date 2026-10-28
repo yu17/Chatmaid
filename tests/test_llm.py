@@ -14,7 +14,7 @@ def test_fake_llm_records_calls_and_fails_on_request():
         f.complete(system="SUM\nmore", user="u", model="m")
     assert f.complete(system="# SUM\nmore", user="u", model="m") == '{"summary": "s"}'
     assert len(f.calls) == 2
-    assert set(f.calls[-1]) == {"system", "user", "model", "json_schema", "max_tokens", "temperature", "grammar"}
+    assert set(f.calls[-1]) == {"system", "user", "model", "json_schema"}
 
 
 def test_fake_llm_unknown_key_returns_empty_object():
@@ -28,44 +28,56 @@ def test_fake_embed_is_deterministic():
     assert all(0 <= x < 1 for x in f.embed(["a", "b"], model="e")[1])
 
 
-def test_lmstudio_client_builds_json_schema_request(monkeypatch):
+def _capture(monkeypatch, client, content):
     captured = {}
 
     class FakeCompletions:
         def create(self, **kw):
             captured.update(kw)
-            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"a":1}'))])
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
 
-    c = LMStudioClient("http://127.0.0.1:1/v1", "tok")
-    monkeypatch.setattr(c._client.chat, "completions", FakeCompletions())
-    assert c.complete(system="s", user="u", model="m", json_schema={"type": "object"}, grammar=True) == '{"a":1}'
+    monkeypatch.setattr(client._client.chat, "completions", FakeCompletions())
+    return captured
+
+
+def test_lmstudio_client_thinking_enforces_schema_without_prefill_or_cap(monkeypatch):
+    c = LMStudioClient("http://127.0.0.1:1/v1", "tok")  # think defaults to on
+    captured = _capture(monkeypatch, c, '{"a":1}')
+    assert c.complete(system="s", user="u", model="m", json_schema={"type": "object"}) == '{"a":1}'
     assert captured["response_format"]["json_schema"]["schema"] == {"type": "object"}
+    assert captured["response_format"]["json_schema"]["strict"] is True
+    assert [m["role"] for m in captured["messages"]] == ["system", "user"]
     assert captured["model"] == "m"
+    assert "max_tokens" not in captured
+    assert captured["temperature"] == 0.6
+
+
+def test_lmstudio_client_think_off_prefills_and_skips_response_format(monkeypatch):
+    c = LMStudioClient("http://127.0.0.1:1/v1", "tok", think=False)
+    captured = _capture(monkeypatch, c, "{}")
+    c.complete(system="s", user="u", model="m", json_schema={"type": "object"})
+    assert "response_format" not in captured
+    assert captured["messages"][-1] == {"role": "assistant", "content": "<think>\n\n</think>\n\n"}
+    assert "max_tokens" not in captured
+
+
+def test_lmstudio_client_sends_configured_temperature(monkeypatch):
+    c = LMStudioClient("http://127.0.0.1:1/v1", "tok", temperature=0.9)
+    captured = _capture(monkeypatch, c, "{}")
+    c.complete(system="s", user="u", model="m")
+    assert captured["temperature"] == 0.9
+
+
+def test_lmstudio_client_strips_inline_think_block(monkeypatch):
+    c = LMStudioClient("http://127.0.0.1:1/v1", "tok")
+    _capture(monkeypatch, c, '<think>\nplan the answer\n</think>\n\n{"a":1}')
+    assert c.complete(system="s", user="u", model="m") == '{"a":1}'
 
 
 def test_lmstudio_client_wraps_errors():
     c = LMStudioClient("http://127.0.0.1:1/v1", "tok", timeout_s=1)
     with pytest.raises(LLMError):
         c.list_models()
-
-
-def test_lmstudio_client_grammar_false_prefills_and_skips_response_format(monkeypatch):
-    captured = {}
-
-    class FakeCompletions:
-        def create(self, **kw):
-            captured.update(kw)
-            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="{}"))])
-
-    c = LMStudioClient("http://127.0.0.1:1/v1", "tok")
-    monkeypatch.setattr(c._client.chat, "completions", FakeCompletions())
-    c.complete(system="s", user="u", model="m", json_schema={"type": "object"}, grammar=False)
-    assert "response_format" not in captured
-    assert captured["messages"][-1] == {"role": "assistant", "content": "<think>\n\n</think>\n\n"}
-    captured.clear()
-    c.complete(system="s", user="u", model="m", json_schema={"type": "object"}, grammar=True)
-    assert captured["response_format"]["json_schema"]["strict"] is True
-    assert [m["role"] for m in captured["messages"]] == ["system", "user"]
 
 
 def test_lmstudio_client_empty_choices_is_an_llm_error(monkeypatch):
@@ -77,8 +89,6 @@ def test_lmstudio_client_empty_choices_is_an_llm_error(monkeypatch):
     monkeypatch.setattr(c._client.chat, "completions", FakeCompletions())
     with pytest.raises(LLMError):
         c.complete(system="s", user="u", model="m")
-
-
 
 
 def test_fake_llm_sequence_responses():

@@ -182,10 +182,21 @@ with a canned prompt that carries no mail content.
 
 ## Models
 
-- `model_small` (`qwen/qwen3-4b-2507`): triage and chunk summaries.
-- `model_main` (`qwen/qwen3.5-35b-a3b`): rolling summaries.
-- `model_heavy` (`qwen3.5-122b-a10b`): style profile. Optional; set it to the
-  `model_main` value to fall back.
+- `lmstudio.model` (`qwen3.5-122b-a10b`): the one local model for triage, chunk
+  and rolling summaries, drafts and revisions, the style profile and person
+  tagging. One model for every call keeps LM Studio from unloading and reloading
+  between calls (its "Only Keep Last JIT Loaded Model" setting is on by
+  default). Change the value to switch models.
+- `lmstudio.think` (`true`): reasoning on. LM Studio returns the reasoning in a
+  separate field and enforces each prompt's JSON schema on the answer. With
+  `false` the client prefills an empty think block, which LM Studio cannot
+  combine with a schema, so the reply is validated afterwards and retried once.
+  LM Studio 0.4.13 ignores the request-level reasoning switches, so the prefill
+  is the only off switch.
+- `lmstudio.temperature` (`0.6`, Qwen's thinking-mode value): sent with every
+  call, overriding the model's LM Studio preset.
+- No `max_tokens` is sent: a local call runs to the model's natural end,
+  reasoning included.
 - `model_embedding` (`text-embedding-qwen3-embedding-0.6b`): 1024 dimensions.
 
 ## Known limitations

@@ -36,9 +36,9 @@ class EmailConfig:
 class LMStudioConfig:
     base_url: str
     token_file: Path
-    model_small: str
-    model_main: str
-    model_heavy: str
+    model: str  # the one local model for every call
+    think: bool  # reasoning on (schema enforced) or off (empty think block prefilled)
+    temperature: float
     model_embedding: str
     embedding_dim: int
     timeout_s: int
@@ -46,7 +46,6 @@ class LMStudioConfig:
 
 @dataclass(frozen=True)
 class DraftConfig:
-    model_role: str
     candidates: int
     recent_messages: int
     memories: int
@@ -71,12 +70,6 @@ class Config:
     lmstudio: LMStudioConfig
     draft: DraftConfig
     cloud: CloudConfig
-
-    @property
-    def draft_model(self) -> str:
-        if self.draft.model_role == "heavy":
-            return self.lmstudio.model_heavy
-        return self.lmstudio.model_main
 
     @property
     def index_path(self) -> Path:
@@ -104,15 +97,14 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
     "lmstudio": {
         "base_url": "http://127.0.0.1:40090/v1",
         "token_file": "LMStudio_token.txt",
-        "model_small": "qwen/qwen3-4b-2507",
-        "model_main": "qwen/qwen3.5-35b-a3b",
-        "model_heavy": "qwen3.5-122b-a10b",
+        "model": "qwen3.5-122b-a10b",
+        "think": True,
+        "temperature": 0.6,
         "model_embedding": "text-embedding-qwen3-embedding-0.6b",
         "embedding_dim": 1024,
         "timeout_s": 600,
     },
     "draft": {
-        "model_role": "main",
         "candidates": 2,
         "recent_messages": 12,
         "memories": 8,
@@ -154,8 +146,17 @@ def load(path: Path, *, project_root: Path | None = None) -> Config:
 
     d, o, e, lm = section("data"), section("owner"), section("email"), section("lmstudio")
     dr, cl = section("draft"), section("cloud")
-    if dr["model_role"] not in ("main", "heavy"):
-        raise ConfigError(f"draft.model_role must be 'main' or 'heavy', got {dr['model_role']!r}")
+    for stale in ("model_small", "model_main", "model_heavy"):
+        if stale in raw.get("lmstudio", {}):
+            raise ConfigError(
+                f"lmstudio.{stale} was replaced by lmstudio.model, the one model for every call"
+            )
+    if "model_role" in raw.get("draft", {}):
+        raise ConfigError("draft.model_role was removed: every call uses lmstudio.model")
+    if not isinstance(lm["think"], bool):
+        raise ConfigError(f"lmstudio.think must be true or false, got {lm['think']!r}")
+    if isinstance(lm["temperature"], bool) or not isinstance(lm["temperature"], (int, float)):
+        raise ConfigError(f"lmstudio.temperature must be a number, got {lm['temperature']!r}")
     if cl["default_backend"] not in ("codex", "claude"):
         raise ConfigError(
             f"cloud.default_backend must be 'codex' or 'claude', got {cl['default_backend']!r}"
@@ -178,15 +179,14 @@ def load(path: Path, *, project_root: Path | None = None) -> Config:
         lmstudio=LMStudioConfig(
             base_url=lm["base_url"],
             token_file=_resolve(lm["token_file"], project_root),
-            model_small=lm["model_small"],
-            model_main=lm["model_main"],
-            model_heavy=lm["model_heavy"],
+            model=lm["model"],
+            think=lm["think"],
+            temperature=float(lm["temperature"]),
             model_embedding=lm["model_embedding"],
             embedding_dim=lm["embedding_dim"],
             timeout_s=lm["timeout_s"],
         ),
         draft=DraftConfig(
-            model_role=dr["model_role"],
             candidates=dr["candidates"],
             recent_messages=dr["recent_messages"],
             memories=dr["memories"],

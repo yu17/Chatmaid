@@ -4,12 +4,28 @@ import openai
 
 from chatmaid.llm.base import LLMError
 
+# An empty think block turns a hybrid model's reasoning off. LM Studio rejects this prefill
+# together with response_format ("Failed to initialize samplers"), so a thinking-off call
+# cannot enforce a schema: callers validate the reply instead. The request-level switches
+# (`reasoning`, `chat_template_kwargs.enable_thinking`) are ignored by LM Studio 0.4.13.
+_NO_THINK_PREFILL = {"role": "assistant", "content": "<think>\n\n</think>\n\n"}
+
 
 class LMStudioClient:
-    def __init__(self, base_url: str, token: str, *, timeout_s: int = 600) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        *,
+        timeout_s: int = 600,
+        think: bool = True,
+        temperature: float = 0.6,
+    ) -> None:
         self._client = openai.OpenAI(
             base_url=base_url, api_key=token, timeout=timeout_s, max_retries=1
         )
+        self._think = think
+        self._temperature = temperature
 
     def complete(
         self,
@@ -18,35 +34,28 @@ class LMStudioClient:
         user: str,
         model: str,
         json_schema: dict | None = None,
-        max_tokens: int = 1024,
-        temperature: float = 0.3,
-        grammar: bool = False,
     ) -> str:
-        kwargs: dict = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-        if not grammar:
-            # An empty think block disables reasoning; LM Studio rejects it together with
-            # response_format, so the schema is not enforced here (callers validate).
-            kwargs["messages"].append({"role": "assistant", "content": "<think>\n\n</think>\n\n"})
-        elif json_schema is not None:
-            kwargs["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {"name": "out", "schema": json_schema, "strict": True},
-            }
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        # No max_tokens: a local call runs to the model's natural end, reasoning included.
+        kwargs: dict = {"model": model, "messages": messages, "temperature": self._temperature}
+        if self._think:
+            if json_schema is not None:  # reasoning lands in reasoning_content; content is the JSON
+                kwargs["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {"name": "out", "schema": json_schema, "strict": True},
+                }
+        else:
+            messages.append(dict(_NO_THINK_PREFILL))
         try:
             resp = self._client.chat.completions.create(**kwargs)
         except openai.OpenAIError as e:
             raise LLMError(str(e)) from e
         if not resp.choices:
             raise LLMError("the completion response has no choices")
-        return resp.choices[0].message.content or ""
+        return _strip_think(resp.choices[0].message.content or "")
 
     def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
         try:
@@ -60,3 +69,13 @@ class LMStudioClient:
             return sorted(m.id for m in self._client.models.list())
         except openai.OpenAIError as e:
             raise LLMError(str(e)) from e
+
+
+def _strip_think(text: str) -> str:
+    """Drop a leading <think>...</think> block if LM Studio ever leaves the reasoning inline."""
+    body = text.lstrip()
+    if body.startswith("<think>"):
+        end = body.find("</think>")
+        if end != -1:
+            return body[end + len("</think>"):].lstrip()
+    return text

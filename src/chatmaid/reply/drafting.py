@@ -49,7 +49,7 @@ def draft_reply(
     """Write candidate replies; may run one history lookup when a fact is missing."""
     prompt = prompts.load("reply_draft")
     user = ctx.render() + f"\n\nWrite {cfg.draft.candidates} candidate replies as the owner."
-    out = complete_json(llm, prompt, user, cfg.draft_model, grammar=False, max_tokens=2048)
+    out = complete_json(llm, prompt, user, cfg.lmstudio.model)
     found = _candidates(out, cfg.draft.candidates)
     if not found and out["lookup"]:
         query = out["lookup"]
@@ -66,7 +66,7 @@ def draft_reply(
             f"\n\n## History lookup for: {query}\n{_hit_lines(hits)}"
             "\nThe lookup is done; now write the candidates."
         )
-        out = complete_json(llm, prompt, user, cfg.draft_model, grammar=False, max_tokens=2048)
+        out = complete_json(llm, prompt, user, cfg.lmstudio.model)
         found = _candidates(out, cfg.draft.candidates)
     if not found:
         raise LLMError("reply_draft: no candidates")
@@ -78,12 +78,5 @@ def revise_reply(
 ) -> Candidate:
     """Rewrite a previous draft applying the owner's feedback."""
     user = ctx.render() + "\n\n## Previous draft\n" + previous + "\n\n## Owner's feedback\n" + comment
-    out = complete_json(
-        llm,
-        prompts.load("reply_revise"),
-        user,
-        cfg.draft_model,
-        grammar=False,
-        max_tokens=1024,
-    )
+    out = complete_json(llm, prompts.load("reply_revise"), user, cfg.lmstudio.model)
     return Candidate(out["text"], out["rationale"])
