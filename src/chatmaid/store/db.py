@@ -279,6 +279,124 @@ class Store:
             params.append(limit)
         return self._conn.execute(sql, params).fetchall()
 
+    # --- senders and the digest queue ---
+
+    def refresh_sender_stats(self) -> int:
+        """Rebuild sender_stat from the index; one row per identity with a non-owner message."""
+        with self.transaction():
+            self._conn.execute("DELETE FROM sender_stat")
+            self._conn.execute(
+                "INSERT INTO sender_stat (identity_id, contact_id, messages, conversations, "
+                "first_seen, last_seen, known, answered, bulk_share, updated_at) "
+                "SELECT m.sender_identity_id, i.contact_id, COUNT(*), "
+                "COUNT(DISTINCT m.conversation_id), MIN(m.sent_at), MAX(m.sent_at), "
+                "EXISTS (SELECT 1 FROM conversation_participant p WHERE p.contact_id = i.contact_id "
+                "AND EXISTS (SELECT 1 FROM message o WHERE o.conversation_id = p.conversation_id "
+                "AND o.is_owner = 1)), "
+                "EXISTS (SELECT 1 FROM message s JOIN message o "
+                "ON o.conversation_id = s.conversation_id AND o.is_owner = 1 "
+                "WHERE s.sender_identity_id = m.sender_identity_id AND s.is_owner = 0), "
+                "CAST(SUM(m.bulk = 1) AS REAL) / COUNT(*), ? "
+                "FROM message m JOIN identity i ON i.id = m.sender_identity_id "
+                "WHERE m.is_owner = 0 GROUP BY m.sender_identity_id",
+                (_now(),),
+            )
+            categories: dict[int, dict[str, int]] = {}
+            rows = self._conn.execute(
+                "SELECT s.sender_identity_id AS identity_id, c.category AS category, "
+                "COUNT(DISTINCT c.id) AS n FROM message s JOIN conversation c "
+                "ON c.id = s.conversation_id "
+                "WHERE s.is_owner = 0 AND c.category IS NOT NULL AND s.sender_identity_id IS NOT NULL "
+                "GROUP BY s.sender_identity_id, c.category"
+            ).fetchall()
+            for r in rows:
+                categories.setdefault(r["identity_id"], {})[r["category"]] = r["n"]
+            for identity_id, counts in categories.items():
+                self._conn.execute(
+                    "UPDATE sender_stat SET categories_json = ? WHERE identity_id = ?",
+                    (json.dumps(counts, ensure_ascii=False), identity_id),
+                )
+            return self._conn.execute("SELECT COUNT(*) FROM sender_stat").fetchone()[0]
+
+    def sender_stat(self, identity_id: int) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT * FROM sender_stat WHERE identity_id = ?", (identity_id,)
+        ).fetchone()
+
+    # the sender of a conversation: sender identity of its earliest non-owner message
+    _FIRST_SENDER = (
+        "(SELECT m.sender_identity_id FROM message m WHERE m.conversation_id = {conv} "
+        "AND m.is_owner = 0 ORDER BY m.sent_at, m.id LIMIT 1)"
+    )
+
+    def sender_context(self, conversation_id: int) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT * FROM sender_stat WHERE identity_id = " + self._FIRST_SENDER.format(conv="?"),
+            (conversation_id,),
+        ).fetchone()
+
+    def digest_queue(
+        self, *, exclude_bulk: bool, limit: int | None = None, group: int | None = None
+    ) -> list[sqlite3.Row]:
+        first = self._FIRST_SENDER.format(conv="c.id")
+        inner = (
+            "SELECT c.*, s.messages AS sender_messages, "
+            "CASE WHEN c.message_count >= 2 AND c.last_owner_at IS NOT NULL THEN 1 "
+            "WHEN c.message_count >= 2 THEN 2 "
+            f"WHEN {first} IS NULL OR s.known = 1 THEN 3 "
+            "WHEN s.messages < 5 THEN 4 ELSE 5 END AS queue_group "
+            f"FROM conversation c LEFT JOIN sender_stat s ON s.identity_id = {first} "
+            "WHERE c.summary IS NULL AND c.tracked != 0"
+        )
+        if exclude_bulk:
+            inner += " AND c.bulk = 0"
+        sql = f"SELECT * FROM ({inner})"
+        params: list = []
+        if group is not None:
+            sql += " WHERE queue_group = ?"
+            params.append(group)
+        sql += (
+            " ORDER BY queue_group, CASE WHEN queue_group = 5 THEN sender_messages END, "
+            "last_message_at DESC"
+        )
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        return self._conn.execute(sql, params).fetchall()
+
+    def learned_bulk(self, identity_id: int | None, *, min_conversations: int) -> bool:
+        if identity_id is None:
+            return False
+        row = self.sender_stat(identity_id)
+        if row is None or not row["categories_json"]:
+            return False
+        counts = json.loads(row["categories_json"])
+        return sum(counts.values()) >= min_conversations and set(counts) <= {
+            "promotional",
+            "newsletter",
+            "system",
+        }
+
+    def sender_stats(self, *, limit: int, category: str | None = None) -> list[sqlite3.Row]:
+        sql = (
+            "SELECT s.*, i.address AS address FROM sender_stat s "
+            "JOIN identity i ON i.id = s.identity_id"
+        )
+        params: list = []
+        if category is not None:
+            sql += " WHERE EXISTS (SELECT 1 FROM json_each(s.categories_json) WHERE key = ?)"
+            params.append(category)
+        sql += " ORDER BY s.messages DESC, s.identity_id LIMIT ?"
+        params.append(limit)
+        return self._conn.execute(sql, params).fetchall()
+
+    def category_counts(self) -> dict[str, int]:
+        rows = self._conn.execute(
+            "SELECT COALESCE(category, 'unknown') AS category, COUNT(*) AS n FROM conversation "
+            "WHERE summary IS NOT NULL GROUP BY 1"
+        ).fetchall()
+        return {r["category"]: r["n"] for r in rows}
+
     # --- messages ---
 
     def upsert_message(
