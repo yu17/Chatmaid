@@ -124,6 +124,24 @@ def test_body_path_resolves_sha256_name_for_opaque_uid(tmp_path):
         c.close()
 
 
+def test_body_path_resolves_md5_name_for_microsoft365_uid(tmp_path):
+    # Camel's Microsoft 365 backend stores a body under the MD5 hex of the item id, in a
+    # bucket that is not the digest's first two characters (verified on a live cache).
+    uid = "AQMkADAwATY3ZmYAZS1hNjYBLTQwYTgtMDACLTAwCgBGAAADpvnCWpYVZ0Gu"
+    cache_dir = make_cache(tmp_path, "a1", {"收件箱": [dict(uid=uid, dreceived=1)]})
+    bucket = cache_dir / "a1" / "folders" / "收件箱" / "cur" / "32"
+    bucket.mkdir(parents=True)
+    (bucket / hashlib.md5(uid.encode()).hexdigest()).write_text("m365 body")
+    c = EvolutionCache(cache_dir, "a1")
+    try:
+        [inbox] = c.folders()
+        found = c.body_path(inbox, uid)
+        assert found is not None and found.name == hashlib.md5(uid.encode()).hexdigest()
+        assert found.read_text() == "m365 body"
+    finally:
+        c.close()
+
+
 def test_body_path_resolves_uri_escaped_name(tmp_path):
     cache_dir = make_cache(tmp_path, "a1", {"X": [dict(uid="a b", dreceived=1)]})
     bucket = cache_dir / "a1" / "folders" / "X" / "cur" / "3f"

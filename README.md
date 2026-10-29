@@ -92,7 +92,10 @@ Run commands as `uv run chatmaid [--config PATH] <command>` (default config is
 Notes:
 
 - Gmail and IMAP folders are tracked by integer uid. Exchange and Microsoft 365
-  folders have opaque uids and are tracked by received time.
+  folders have opaque uids and are tracked by received time. Cached bodies are
+  found by the uid, its SHA-256 (Exchange Web Services), its MD5 (Microsoft 365)
+  or its URI-escaped form; a body exists only for mail Evolution has downloaded
+  ("Copy folder content locally for offline operation", then a download or sync).
 - Ingest checkpoints record the run's `--since`. `init --reset-checkpoints`
   clears them so a complete-history ingest can follow an earlier `--since` run.
 - `init --pass digest` reads message bodies from Evolution's cache at digest

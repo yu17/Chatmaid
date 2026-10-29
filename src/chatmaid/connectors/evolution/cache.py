@@ -149,14 +149,22 @@ class EvolutionCache:
         """The cached body file of `uid`, searched across the `cur/<hh>/` buckets.
 
         Camel names the file after the uid itself (numeric IMAP uids), after the SHA-256 hex
-        digest of a long opaque uid (Exchange / Microsoft 365), or after the URI-escaped form
-        of a short uid with unsafe characters; the candidates are tried in that order.
+        digest of a long opaque uid (Exchange Web Services), after the MD5 hex digest of the
+        item id (Microsoft 365), or after the URI-escaped form of a short uid with unsafe
+        characters; the candidates are tried in that order. The bucket directory is not
+        derived from the name, so every bucket is searched.
         """
         cur = self.folder_dir(folder.name) / "cur"
         if not cur.is_dir():
             return None
+        encoded = uid.encode()
         names = dict.fromkeys(
-            (uid, hashlib.sha256(uid.encode()).hexdigest(), quote(uid, safe=_CAMEL_SAFE))
+            (
+                uid,
+                hashlib.sha256(encoded).hexdigest(),
+                hashlib.md5(encoded).hexdigest(),
+                quote(uid, safe=_CAMEL_SAFE),
+            )
         )
         buckets = sorted(p for p in cur.iterdir() if p.is_dir())
         for name in names:
