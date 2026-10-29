@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from chatmaid.config import Config
@@ -13,6 +13,7 @@ from chatmaid.connectors.base import Connector
 from chatmaid.init.chunking import detect_language
 from chatmaid.llm.base import LLM, LLMError
 from chatmaid.model import NormalizedMessage, SourceRef, make_preview
+from chatmaid.quoting import strip_reply_chrome
 from chatmaid.store import Store
 
 log = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ class ReplyContext:
     language: str
     tier: str | None
     message: str
+    examples: list[tuple[str, int, str, str]] = field(default_factory=list)  # (ref_key, sent_at, to, text)
 
     def to_json(self) -> dict:
         """Stored record: previews only (200 chars), never full message bodies."""
@@ -39,6 +41,7 @@ class ReplyContext:
             "recent": [[t, who, make_preview(text)] for t, who, text in self.recent],
             "memories": list(self.memories),
             "style": self.style,
+            "examples": [[k, t, to, make_preview(text)] for k, t, to, text in self.examples],
             "language": self.language,
             "tier": self.tier,
             "message": make_preview(self.message),
@@ -52,6 +55,7 @@ class ReplyContext:
             recent=[(int(t), who, text) for t, who, text in d["recent"]],
             memories=list(d["memories"]),
             style=d["style"],
+            examples=[(k, int(t), to, text) for k, t, to, text in d["examples"]],
             language=d["language"],
             tier=d["tier"],
             message=d["message"],
@@ -71,6 +75,8 @@ class ReplyContext:
         ]
         if self.style is not None:
             parts.append(f"## Owner's style\n{self.style}")
+        examples = "\n".join(f"[{day(t)} to {to}] {text}" for _k, t, to, text in self.examples) or "(none)"
+        parts.append(f"## Your similar past replies\n{examples}")
         parts.append(f"## Message to answer\n{self.message}")
         return "\n\n".join(parts)
 
@@ -114,9 +120,17 @@ def _recent(
     return out
 
 
+def _query_vector(llm: LLM, cfg: Config, msg: NormalizedMessage) -> list[float] | None:
+    try:
+        return llm.embed([msg.text[:2000]], model=cfg.lmstudio.model_embedding)[0]
+    except LLMError as e:
+        log.warning("embedding the incoming message failed, skipping vector memories and examples: %s", e)
+        return None
+
+
 def _memories(
-    store: Store, llm: LLM, cfg: Config, conversation_id: int,
-    msg: NormalizedMessage, contact_id: int | None,
+    store: Store, cfg: Config, conversation_id: int, contact_id: int | None,
+    vec: list[float] | None,
 ) -> list[str]:
     texts = [
         r["text"]
@@ -124,16 +138,39 @@ def _memories(
             contact_id=contact_id, conversation_id=conversation_id, limit=cfg.draft.memories
         )
     ]
-    try:
-        vec = llm.embed([msg.text[:2000]], model=cfg.lmstudio.model_embedding)[0]
-    except LLMError as e:
-        log.warning("embedding the incoming message failed, skipping vector memories: %s", e)
-    else:
+    if vec is not None:
         for _kind, ref_id, _dist in store.search_embeddings(vec, k=cfg.draft.memories, kind="memory"):
             row = store.memory(ref_id)
             if row is not None:
                 texts.append(row["text"])
     return list(dict.fromkeys(texts))[: 2 * cfg.draft.memories]
+
+
+def _examples(
+    store: Store, connector: Connector, cfg: Config, conversation_id: int,
+    vec: list[float] | None,
+) -> list[tuple[str, int, str, str]]:
+    """The owner's own past messages nearest the incoming one, from other conversations."""
+    if vec is None or cfg.draft.examples == 0:
+        return []
+    out: list[tuple[str, int, str, str]] = []
+    hits = store.search_embeddings(vec, k=cfg.draft.examples * 3, kind="owner_message")
+    for _kind, ref_id, _dist in hits:
+        row = store.message(ref_id)
+        if row is None or row["conversation_id"] == conversation_id:
+            continue
+        try:
+            sent = connector.fetch(SourceRef.from_key(row["ref_key"]))
+        except (KeyError, OSError, sqlite3.Error):
+            continue
+        text = strip_reply_chrome(sent.text).strip()[:800]
+        if not text:
+            continue
+        to = (sent.recipients[0].name or sent.recipients[0].email) if sent.recipients else "?"
+        out.append((row["ref_key"], sent.sent_at, to, text))
+        if len(out) >= cfg.draft.examples:
+            break
+    return out
 
 
 def build_context(
@@ -158,13 +195,15 @@ def build_context(
             contact_id = store.contact_id_of(stored["sender_identity_id"])
         except KeyError:
             contact_id = None
+    vec = _query_vector(llm, cfg, msg)
     return ReplyContext(
         contact_card=_contact_card(store, msg, contact_id),
         summary=conversation["summary"] or "",
         recent=_recent(store, connector, cfg, conversation_id, msg, now),
-        memories=_memories(store, llm, cfg, conversation_id, msg, contact_id),
+        memories=_memories(store, cfg, conversation_id, contact_id, vec),
         style=store.style_profile(language, tier or "default")
         or store.style_profile(language, "default"),
+        examples=_examples(store, connector, cfg, conversation_id, vec),
         language=language,
         tier=tier,
         message=msg.text[: cfg.draft.message_chars],

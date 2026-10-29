@@ -108,3 +108,11 @@ def test_invalid_backend_rejected(tmp_path):
     p.write_text('[cloud]\ndefault_backend = "gemini"\n')
     with pytest.raises(ConfigError):
         load(p, project_root=tmp_path)
+
+
+def test_draft_examples_default_and_validation(tmp_path):
+    assert load(Path("config.example.toml"), project_root=tmp_path).draft.examples == 3
+    p = tmp_path / "config.toml"
+    p.write_text('[draft]\nexamples = -1\n')
+    with pytest.raises(ConfigError, match="draft.examples"):
+        load(p, project_root=tmp_path)

@@ -75,7 +75,8 @@ def test_render_sections_order_and_roundtrip(env):
     ctx = build(e, msg, row)
     out = ctx.render()
     heads = ["## Contact", "## Conversation summary", "## Recent messages",
-             "## Relevant memories", "## Owner's style", "## Message to answer"]
+             "## Relevant memories", "## Owner's style", "## Your similar past replies",
+             "## Message to answer"]
     pos = [out.index(h) for h in heads]
     assert pos == sorted(pos)
     assert ReplyContext.from_json(ctx.to_json()) == ctx
@@ -102,3 +103,33 @@ def test_recent_excludes_the_incoming_message(env, sample_message):
     texts = [t for _, _, t in ctx.recent]
     assert "INCOMING-777" not in texts
     assert any("thanks, see you tomorrow" in t for t in texts)
+
+
+def test_context_includes_owner_examples_excluding_current_conversation(env):
+    e, msg, row = env
+    ctx = build(e, msg, row)
+    assert 1 <= len(ctx.examples) <= e.config.draft.examples
+    assert all(e.store.message_by_ref(x[0])["conversation_id"] != row["conversation_id"] for x in ctx.examples)
+    text = ctx.render()
+    assert text.index("## Your similar past replies") < text.index("## Message to answer")
+
+
+def test_context_examples_are_stripped_and_cut_to_800(env, monkeypatch):
+    e, msg, row = env
+    monkeypatch.setattr(e.connector, "fetch", lambda ref: replace(msg, text="x" * 900 + "\n> quoted", ref=ref))
+    ctx = build(e, msg, row)
+    assert ctx.examples and all(len(x[3]) == 800 and "quoted" not in x[3] for x in ctx.examples)
+
+
+def test_context_json_stores_example_previews_only(env):
+    e, msg, row = env
+    d = build(e, msg, row).to_json()
+    assert d["examples"] and all(len(x[3]) <= 200 for x in d["examples"])
+    assert ReplyContext.from_json(d).examples == [tuple(x) for x in d["examples"]]
+
+
+def test_zero_examples_disables_the_section(env):
+    e, msg, row = env
+    cfg = replace(e.config, draft=replace(e.config.draft, examples=0))
+    ctx = build_context(e.store, e.connector, FakeLLM(dim=4), cfg, row["conversation_id"], msg, now=NOW)
+    assert ctx.examples == [] and "(none)" in ctx.render().split("## Your similar past replies")[1]

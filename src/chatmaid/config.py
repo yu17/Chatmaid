@@ -50,6 +50,7 @@ class DraftConfig:
     memories: int
     message_chars: int
     max_age_days: int
+    examples: int
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,7 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
         "memories": 8,
         "message_chars": 6000,
         "max_age_days": 14,
+        "examples": 3,
     },
     "cloud": {
         "default_backend": "codex",
@@ -162,6 +164,8 @@ def load(path: Path, *, project_root: Path | None = None) -> Config:
         raise ConfigError(
             f"cloud.default_backend must be 'codex' or 'claude', got {cl['default_backend']!r}"
         )
+    if not isinstance(dr["examples"], int) or isinstance(dr["examples"], bool) or dr["examples"] < 0:
+        raise ConfigError(f"draft.examples must be an integer >= 0, got {dr['examples']!r}")
     sent = e["local_maildir_sent"]
     return Config(
         data=DataConfig(dir=_resolve(d["dir"], project_root), hot_window_days=d["hot_window_days"]),
@@ -192,6 +196,7 @@ def load(path: Path, *, project_root: Path | None = None) -> Config:
             memories=dr["memories"],
             message_chars=dr["message_chars"],
             max_age_days=dr["max_age_days"],
+            examples=dr["examples"],
         ),
         cloud=CloudConfig(
             default_backend=cl["default_backend"],
