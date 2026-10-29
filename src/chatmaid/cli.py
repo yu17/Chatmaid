@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import signal
 import sqlite3
@@ -26,7 +27,8 @@ from chatmaid.init.pipeline import InitOptions, InitPipeline
 from chatmaid.init.progress import ProgressLogHandler
 from chatmaid.llm.fake import FakeLLM
 from chatmaid.lock import Busy, exclusive
-from chatmaid.lookup import search_history
+from chatmaid.init.categories import CATEGORIES
+from chatmaid.lookup import search_history, search_threads
 from chatmaid.llm.fake import CANNED
 from chatmaid.model import SourceRef
 from chatmaid.reply.flow import ReplyFlow
@@ -207,6 +209,8 @@ def _status_command(args: argparse.Namespace) -> int:
         without = len(store.conversations(needing_summary=True, exclude_bulk=False))
         print(f"conversations_with_summary={with_summary}")
         print(f"conversations_without_summary={without}")
+        for name, n in store.category_counts().items():
+            print(f"category_{name}={n}")
     finally:
         store.close()
     return 0
@@ -225,10 +229,12 @@ def _conversations_command(args: argparse.Namespace) -> int:
     cfg = load_config(Path(args.config))
     store = _open_store(cfg)
     try:
-        print("id  last  count  title  summary")
-        for c in store.conversations(limit=args.limit, exclude_bulk=not args.all):
+        print("id  last  count  category  title  summary")
+        for c in store.conversations(
+            limit=args.limit, exclude_bulk=not args.all, category=args.category
+        ):
             summary = (c["summary"] or "-").replace("\n", " ")[:60]
-            print(f"{c['id']}  {_day(c['last_message_at'])}  {c['message_count']}  {c['title']}  {summary}")
+            print(f"{c['id']}  {_day(c['last_message_at'])}  {c['message_count']}  {c['category'] or '-'}  {c['title']}  {summary}")
     finally:
         store.close()
     return 0
@@ -238,7 +244,28 @@ def register_conversations(subparsers) -> None:
     p = subparsers.add_parser("conversations", help="list indexed conversations")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--all", action="store_true", help="include bulk conversations")
+    p.add_argument("--category", choices=CATEGORIES, default=None)
     p.set_defaults(handler=_conversations_command)
+
+
+def _senders_command(args: argparse.Namespace) -> int:
+    cfg = load_config(Path(args.config))
+    store = _open_store(cfg)
+    try:
+        print("address  messages  convs  known  replied  categories")
+        for r in store.sender_stats(limit=args.limit, category=args.category):
+            cats = " ".join(f"{k}:{v}" for k, v in json.loads(r["categories_json"] or "{}").items())
+            print(f"{r['address']}  {r['messages']}  {r['conversations']}  {r['known']}  {r['answered']}  {cats or '-'}")
+    finally:
+        store.close()
+    return 0
+
+
+def register_senders(subparsers) -> None:
+    p = subparsers.add_parser("senders", help="list senders by message count")
+    p.add_argument("--limit", type=int, default=30)
+    p.add_argument("--category", choices=CATEGORIES, default=None)
+    p.set_defaults(handler=_senders_command)
 
 
 def _show_command(args: argparse.Namespace) -> int:
@@ -250,6 +277,7 @@ def _show_command(args: argparse.Namespace) -> int:
             print(f"no conversation with id {args.id}", file=sys.stderr)
             return 1
         print(f"Title: {conv['title']}")
+        print(f"Category: {conv['category'] or '-'}")
         print(f"Summary: {conv['summary'] or '-'}")
         print(f"Participants: {', '.join(store.participant_labels(args.id))}")
         print()
@@ -270,7 +298,11 @@ def register_show(subparsers) -> None:
 
 
 def _lookup_command(args: argparse.Namespace) -> int:
+    if args.threads and args.no_vector:
+        print("thread search needs the embedding model", file=sys.stderr)
+        return 2
     cfg = load_config(Path(args.config))
+    categories = tuple(args.category or ())
     llm = None
     if not args.no_vector:
         try:
@@ -284,11 +316,17 @@ def _lookup_command(args: argparse.Namespace) -> int:
         owner = OwnerIdentity.from_accounts(accounts, cfg.owner.extra_addresses, cfg.owner.aliases)
         connector = EvolutionConnector(cfg.email, accounts, owner)
         store = _open_store(cfg)
-        hits = search_history(
-            store, connector, llm, query=args.query, contact=args.contact,
-            since=args.since, until=args.until, limit=args.limit,
-            embedding_model=cfg.lmstudio.model_embedding,
-        )
+        if args.threads:
+            thread_hits = search_threads(
+                store, llm, query=args.query, categories=categories, limit=args.limit,
+                embedding_model=cfg.lmstudio.model_embedding,
+            )
+        else:
+            hits = search_history(
+                store, connector, llm, query=args.query, contact=args.contact,
+                since=args.since, until=args.until, limit=args.limit,
+                embedding_model=cfg.lmstudio.model_embedding, categories=categories,
+            )
     except LLMError as e:
         print(f"lookup failed: {e}", file=sys.stderr)
         return 1
@@ -300,6 +338,11 @@ def _lookup_command(args: argparse.Namespace) -> int:
             store.close()
         if connector is not None:
             connector.close()
+    if args.threads:
+        for t in thread_hits:
+            summary = t.summary.replace("\n", " ")
+            print(f"{t.conversation_id}  {_day(t.last_message_at)}  {t.category or '-'}  {t.title}  \u2014  {summary}")
+        return 0
     for h in hits:
         snippet = h.snippet.replace("\n", " ")
         print(f"{_day(h.sent_at)}  {h.sender}  {h.subject}  \u2014  {snippet}")
@@ -314,6 +357,8 @@ def register_lookup(subparsers) -> None:
     p.add_argument("--until", type=_parse_since, default=None, metavar="YYYY-MM-DD")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--no-vector", action="store_true", help="metadata search only")
+    p.add_argument("--category", action="append", choices=CATEGORIES, default=None)
+    p.add_argument("--threads", action="store_true", help="search conversation summaries")
     p.set_defaults(handler=_lookup_command)
 
 
@@ -640,6 +685,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, argparse._SubParsersAction]
     register_init(subparsers)
     register_status(subparsers)
     register_conversations(subparsers)
+    register_senders(subparsers)
     register_show(subparsers)
     register_lookup(subparsers)
     register_watch(subparsers)

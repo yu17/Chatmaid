@@ -1,5 +1,5 @@
 from chatmaid.llm.fake import FakeLLM
-from chatmaid.lookup import search_history
+from chatmaid.lookup import search_history, search_threads
 
 
 def test_search_history_finds_by_subject_and_snippet(digested_env):
@@ -70,3 +70,17 @@ def test_search_history_skips_candidate_on_sqlite_error(digested_env, monkeypatc
     monkeypatch.setattr(digested_env.connector, "fetch", flaky)
     hits = search_history(digested_env.store, digested_env.connector, None, query="s")
     assert len(calls) >= 2 and len(hits) == len(calls) - 1
+
+
+def test_search_history_filters_by_category(digested_env):
+    store = digested_env.store
+    hit = search_history(store, digested_env.connector, None, query="hello")[0]
+    store.set_conversation_category(hit.conversation_id, "promotional")
+    assert search_history(store, digested_env.connector, None, query="hello", categories=("conversation",)) == []
+    assert search_history(store, digested_env.connector, None, query="hello", categories=("promotional",))[0].category == "promotional"
+
+
+def test_search_threads_ranks_conversations(digested_env):
+    hits = search_threads(digested_env.store, FakeLLM(dim=4), query="S1", embedding_model="e")
+    assert hits and hits[0].summary.startswith("S") and all(h.category == "conversation" for h in hits)
+    assert search_threads(digested_env.store, FakeLLM(dim=4), query="S1", categories=("event",), embedding_model="e") == []

@@ -23,6 +23,7 @@ def cli_env(fake_env):
     p = InitPipeline(store, fake_env.connector, llm, fake_env.config)
     p.ingest(InitOptions())
     p.digest(InitOptions())
+    p.embed(InitOptions())
     store.close()
     return fake_env
 
@@ -132,3 +133,21 @@ def test_cli_init_stopped_exits_130(fake_env, monkeypatch, capsys):
     monkeypatch.setattr("chatmaid.cli.InitPipeline.digest", stopped_digest)
     rc = main(["--config", str(fake_env.config_path), "init", "--pass", "digest", "--fake-llm"])
     assert rc == 130 and "stopped; run the same command to resume" in capsys.readouterr().err
+
+
+def test_cli_lookup_threads_and_category(cli_env, capsys, monkeypatch):
+    monkeypatch.setattr("chatmaid.cli._lmstudio_client", lambda cfg, token: FakeLLM(dim=4))
+    monkeypatch.setattr("chatmaid.cli.read_token", lambda cfg: "t")
+    cfg = ["--config", str(cli_env.config_path)]
+    assert main([*cfg, "lookup", "S1", "--threads"]) == 0 and "conversation" in capsys.readouterr().out
+    assert main([*cfg, "lookup", "hello", "--no-vector", "--category", "event"]) == 0 and capsys.readouterr().out == ""
+    assert main([*cfg, "lookup", "S1", "--threads", "--no-vector"]) == 2
+
+
+def test_cli_senders_and_status_show_categories(cli_env, capsys):
+    cfg = ["--config", str(cli_env.config_path)]
+    assert main([*cfg, "status"]) == 0 and "category_conversation=" in capsys.readouterr().out
+    assert main([*cfg, "senders", "--limit", "5"]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].startswith("address") and "ann@x.org" in out
+    assert main([*cfg, "conversations", "--category", "conversation"]) == 0 and "conversation" in capsys.readouterr().out

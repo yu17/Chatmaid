@@ -22,6 +22,17 @@ class Hit:
     snippet: str
     score: float
     conversation_id: int
+    category: str | None = None
+
+
+@dataclass
+class ThreadHit:
+    conversation_id: int
+    last_message_at: int
+    category: str | None
+    title: str
+    summary: str
+    score: float
 
 
 def _snippet(text: str, query: str, preview: str) -> str:
@@ -44,6 +55,7 @@ def search_history(
     until: int | None = None,
     limit: int = 20,
     embedding_model: str | None = None,
+    categories: tuple[str, ...] = (),
 ) -> list[Hit]:
     candidates: dict[str, tuple[object, float]] = {}
 
@@ -73,7 +85,15 @@ def search_history(
                 add(row, score)
 
     hits: list[Hit] = []
+    categories_by_conversation: dict[int, str | None] = {}
     for row, score in candidates.values():
+        cid = row["conversation_id"]
+        if cid not in categories_by_conversation:
+            conv = store.conversation(cid)
+            categories_by_conversation[cid] = conv["category"] if conv else None
+        category = categories_by_conversation[cid]
+        if categories and category not in categories:
+            continue
         try:
             msg = connector.fetch(SourceRef.from_key(row["ref_key"]))
         except (KeyError, OSError, sqlite3.Error) as e:
@@ -87,8 +107,39 @@ def search_history(
                 subject=msg.subject,
                 snippet=_snippet(msg.text, query, row["preview"] or msg.preview),
                 score=score,
-                conversation_id=row["conversation_id"],
+                conversation_id=cid,
+                category=category,
             )
         )
     hits.sort(key=lambda h: (-h.score, -h.sent_at))
+    return hits[:limit]
+
+
+def search_threads(
+    store: Store,
+    llm: LLM,
+    *,
+    query: str,
+    categories: tuple[str, ...] = (),
+    limit: int = 20,
+    embedding_model: str,
+) -> list[ThreadHit]:
+    vec = llm.embed([query], model=embedding_model)[0]
+    k = limit * 3 if categories else limit
+    hits: list[ThreadHit] = []
+    for _kind, cid, distance in store.search_embeddings(vec, k=k, kind="conversation"):
+        conv = store.conversation(cid)
+        if conv is None or (categories and conv["category"] not in categories):
+            continue
+        hits.append(
+            ThreadHit(
+                conversation_id=cid,
+                last_message_at=conv["last_message_at"],
+                category=conv["category"],
+                title=conv["title"],
+                summary=(conv["summary"] or "")[:SNIPPET_LENGTH],
+                score=1.0 / (1.0 + distance),
+            )
+        )
+    hits.sort(key=lambda h: -h.score)
     return hits[:limit]
