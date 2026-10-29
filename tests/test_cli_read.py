@@ -70,6 +70,15 @@ def test_cli_init_ingest_needs_no_token(fake_env, capsys):
         store.close()
 
 
+def test_cli_init_fake_llm_digests(fake_env, capsys):
+    cfg = str(fake_env.config_path)
+    assert main(["--config", cfg, "init", "--pass", "ingest"]) == 0
+    assert main(["--config", cfg, "init", "--pass", "digest", "--fake-llm"]) == 0
+    out = capsys.readouterr().out
+    found = re.search(r"digest: DigestStats\(conversations=(\d+)", out)
+    assert found and int(found.group(1)) >= 1
+
+
 def test_cli_init_model_pass_without_token_fails_cleanly(fake_env, capsys):
     assert main(["--config", str(fake_env.config_path), "init", "--pass", "digest"]) == 1
     assert "token" in capsys.readouterr().err.lower()

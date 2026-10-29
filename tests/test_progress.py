@@ -1,6 +1,7 @@
 import io
+import logging
 
-from chatmaid.init.progress import Progress
+from chatmaid.init.progress import Progress, ProgressLogHandler
 
 
 class Tty(io.StringIO):
@@ -38,3 +39,34 @@ def test_progress_label_is_cut_to_40_chars():
     p = Progress("x", 1, stream=out)
     p.update(0, "a" * 60)
     assert "a" * 41 not in out.getvalue()
+
+
+def _logger(stream):
+    log = logging.getLogger("test_progress.redraw")
+    log.handlers[:] = [ProgressLogHandler(stream)]
+    log.propagate = False
+    return log
+
+
+def test_log_record_clears_and_redraws_the_line():
+    out = Tty()
+    p = Progress("digest", 4, stream=out)
+    p.update(1, "x")
+    first = out.getvalue()
+    _logger(out).warning("digest failed for conversation 7")
+    after = out.getvalue()[len(first):]
+    line = first.removeprefix("\r")
+    cleared = after.index("\r")
+    record = after.index("digest failed for conversation 7\n")
+    redraw = after.index("\r" + line, record)
+    assert cleared < record < redraw
+    assert after.endswith("\r" + line)
+    p.finish()
+    assert Progress.active is None
+
+    plain = io.StringIO()
+    q = Progress("digest", 4, stream=plain)
+    q.update(1, "x")
+    _logger(plain).warning("plain record")
+    q.finish()
+    assert "plain record\n" in plain.getvalue() and "\r" not in plain.getvalue()

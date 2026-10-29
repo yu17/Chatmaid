@@ -23,6 +23,7 @@ from chatmaid.connectors.evolution.sources import load_accounts
 from chatmaid.daemon import Watcher
 from chatmaid.identity import OwnerIdentity
 from chatmaid.init.pipeline import InitOptions, InitPipeline
+from chatmaid.init.progress import ProgressLogHandler
 from chatmaid.llm.fake import FakeLLM
 from chatmaid.lock import Busy, exclusive
 from chatmaid.lookup import search_history
@@ -131,11 +132,16 @@ def _init_command(args: argparse.Namespace) -> int:
 
 
 def _init_locked(args: argparse.Namespace, cfg) -> int:
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+        handlers=[ProgressLogHandler(sys.stderr)],
+    )
     accounts = load_accounts(cfg.email.evolution_config_dir, cfg.email.accounts)
     owner = OwnerIdentity.from_accounts(accounts, cfg.owner.extra_addresses, cfg.owner.aliases)
     passes = InitOptions().passes if args.pass_name == "all" else (args.pass_name,)
     if args.fake_llm:
-        llm = FakeLLM()
+        llm = FakeLLM(dict(CANNED))
     elif all(name == "ingest" for name in passes):
         llm = _NoLLM()  # the client (and its token) is only built for passes that call a model
     else:

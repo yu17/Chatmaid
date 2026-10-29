@@ -1,5 +1,6 @@
 """One progress line for a long pass: redrawn in place on a terminal, logged otherwise."""
 
+import logging
 import sys
 import time
 from collections import deque
@@ -16,6 +17,8 @@ def _hours(seconds: float) -> str:
 
 
 class Progress:
+    active: "Progress | None" = None  # the line currently drawn on a terminal, for log records
+
     def __init__(
         self,
         name: str,
@@ -35,7 +38,7 @@ class Progress:
         self._start = clock()
         self._samples: deque[tuple[int, float]] = deque(maxlen=window)
         self._width = 0  # longest line drawn so far, to blank out the tail of a longer one
-        self._drawn = False
+        self._drawn = ""  # the last line written on a terminal, padded
 
     def _per_hour(self) -> float | None:
         if len(self._samples) < 2:
@@ -67,16 +70,40 @@ class Progress:
         if self.tty:
             text = self._line(done, label)
             self._width = max(self._width, len(text))
-            self.stream.write("\r" + text.ljust(self._width))
-            self._drawn = True
+            self._drawn = text.ljust(self._width)
+            self.stream.write("\r" + self._drawn)
+            Progress.active = self
         elif done % self.every == 0 or done == self.total:
             self.stream.write(self._line(done, label) + "\n")
         else:
             return
         self.stream.flush()
 
+    def clear(self) -> None:
+        """Blank the drawn line and return the cursor to its start."""
+        self.stream.write("\r" + " " * self._width + "\r")
+
+    def redraw(self) -> None:
+        self.stream.write("\r" + self._drawn)
+        self.stream.flush()
+
     def finish(self, summary: str = "") -> None:
+        if Progress.active is self:
+            Progress.active = None
         if self.tty and self._drawn:
             self.stream.write("\n")
         self.stream.write(summary + "\n")
         self.stream.flush()
+
+
+class ProgressLogHandler(logging.StreamHandler):
+    """Writes log records on their own line, then redraws the active terminal progress line."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        progress = Progress.active
+        if progress is None:
+            super().emit(record)
+            return
+        progress.clear()
+        super().emit(record)
+        progress.redraw()
