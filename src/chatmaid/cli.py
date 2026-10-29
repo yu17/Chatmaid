@@ -298,9 +298,6 @@ def register_show(subparsers) -> None:
 
 
 def _lookup_command(args: argparse.Namespace) -> int:
-    if args.threads and args.no_vector:
-        print("thread search needs the embedding model", file=sys.stderr)
-        return 2
     cfg = load_config(Path(args.config))
     categories = tuple(args.category or ())
     llm = None
@@ -309,6 +306,9 @@ def _lookup_command(args: argparse.Namespace) -> int:
             llm = _lmstudio_client(cfg, read_token(cfg))
         except ConfigError as e:
             print(f"warning: {e}; falling back to metadata search only", file=sys.stderr)
+    if args.threads and llm is None:
+        print("thread search needs the embedding model", file=sys.stderr)
+        return 2
     connector = None
     store = None
     try:

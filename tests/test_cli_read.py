@@ -3,6 +3,7 @@ import re
 import pytest
 
 from chatmaid.cli import main
+from chatmaid.config import ConfigError
 from chatmaid.init.pipeline import DigestStats, InitOptions, InitPipeline
 from chatmaid.llm.base import LLMError
 from chatmaid.llm.fake import FakeLLM
@@ -151,3 +152,14 @@ def test_cli_senders_and_status_show_categories(cli_env, capsys):
     out = capsys.readouterr().out
     assert out.splitlines()[0].startswith("address") and "ann@x.org" in out
     assert main([*cfg, "conversations", "--category", "conversation"]) == 0 and "conversation" in capsys.readouterr().out
+
+
+def test_cli_lookup_threads_without_client_exits_2(cli_env, capsys, monkeypatch):
+    def no_token(cfg):
+        raise ConfigError("no token")
+
+    monkeypatch.setattr("chatmaid.cli.read_token", no_token)
+    cfg = ["--config", str(cli_env.config_path)]
+    assert main([*cfg, "lookup", "S1", "--threads"]) == 2
+    err = capsys.readouterr().err
+    assert "thread search needs the embedding model" in err and "Traceback" not in err
