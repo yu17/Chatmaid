@@ -69,9 +69,7 @@ def register_scan(subparsers) -> None:
 
 def _lmstudio_client(cfg, token: str) -> LMStudioClient:
     lm = cfg.lmstudio
-    return LMStudioClient(
-        lm.base_url, token, timeout_s=lm.timeout_s, think=lm.think, temperature=lm.temperature
-    )
+    return LMStudioClient(lm.base_url, token, timeout_s=lm.timeout_s, think=lm.think)
 
 
 def _llm_check_command(args: argparse.Namespace) -> int:

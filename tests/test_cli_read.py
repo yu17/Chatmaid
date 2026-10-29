@@ -111,5 +111,5 @@ def test_cli_llm_check_builds_client_from_config(fake_env, monkeypatch, capsys):
     assert "grammar" not in captured and "max_tokens" not in captured
     assert built == {
         "base_url": fake_env.config.lmstudio.base_url, "token": "tok",
-        "timeout_s": 600, "think": True, "temperature": 0.6,
+        "timeout_s": 600, "think": True,
     }

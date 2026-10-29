@@ -19,13 +19,11 @@ class LMStudioClient:
         *,
         timeout_s: int = 600,
         think: bool = True,
-        temperature: float = 0.6,
     ) -> None:
         self._client = openai.OpenAI(
             base_url=base_url, api_key=token, timeout=timeout_s, max_retries=1
         )
         self._think = think
-        self._temperature = temperature
 
     def complete(
         self,
@@ -39,8 +37,10 @@ class LMStudioClient:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
-        # No max_tokens: a local call runs to the model's natural end, reasoning included.
-        kwargs: dict = {"model": model, "messages": messages, "temperature": self._temperature}
+        # No max_tokens and no sampling parameters: a local call runs to the model's natural
+        # end, and temperature, top_p, top_k, min_p and penalties come from the model's
+        # per-model defaults in LM Studio, where the owner tunes them for each model and mode.
+        kwargs: dict = {"model": model, "messages": messages}
         if self._think:
             if json_schema is not None:  # reasoning lands in reasoning_content; content is the JSON
                 kwargs["response_format"] = {

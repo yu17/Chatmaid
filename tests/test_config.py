@@ -57,20 +57,25 @@ def test_draft_and_cloud_defaults(tmp_path):
     assert cfg.cloud.redact_amounts is False
 
 
-def test_single_model_think_and_temperature_defaults(tmp_path):
+def test_single_model_and_think_defaults(tmp_path):
     cfg = load(Path("config.example.toml"), project_root=tmp_path)
     assert cfg.lmstudio.model == "qwen3.5-122b-a10b"
     assert cfg.lmstudio.think is True
-    assert cfg.lmstudio.temperature == 0.6
+    assert not hasattr(cfg.lmstudio, "temperature")
 
 
-def test_model_think_and_temperature_are_configurable(tmp_path):
+def test_model_and_think_are_configurable(tmp_path):
     p = tmp_path / "config.toml"
-    p.write_text('[lmstudio]\nmodel = "qwen/qwen3.5-35b-a3b"\nthink = false\ntemperature = 0.7\n')
+    p.write_text('[lmstudio]\nmodel = "qwen/qwen3.5-35b-a3b"\nthink = false\n')
     cfg = load(p, project_root=tmp_path)
-    assert (cfg.lmstudio.model, cfg.lmstudio.think, cfg.lmstudio.temperature) == (
-        "qwen/qwen3.5-35b-a3b", False, 0.7
-    )
+    assert (cfg.lmstudio.model, cfg.lmstudio.think) == ("qwen/qwen3.5-35b-a3b", False)
+
+
+def test_stale_temperature_key_rejected(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[lmstudio]\ntemperature = 0.6\n')
+    with pytest.raises(ConfigError, match="temperature"):
+        load(p, project_root=tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -91,10 +96,9 @@ def test_stale_draft_model_role_rejected(tmp_path):
         load(p, project_root=tmp_path)
 
 
-@pytest.mark.parametrize("text", ['[lmstudio]\nthink = "yes"\n', '[lmstudio]\ntemperature = "hot"\n'])
-def test_think_must_be_bool_and_temperature_a_number(tmp_path, text):
+def test_think_must_be_bool(tmp_path):
     p = tmp_path / "config.toml"
-    p.write_text(text)
+    p.write_text('[lmstudio]\nthink = "yes"\n')
     with pytest.raises(ConfigError):
         load(p, project_root=tmp_path)
 

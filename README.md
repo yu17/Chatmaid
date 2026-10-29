@@ -193,10 +193,12 @@ with a canned prompt that carries no mail content.
   combine with a schema, so the reply is validated afterwards and retried once.
   LM Studio 0.4.13 ignores the request-level reasoning switches, so the prefill
   is the only off switch.
-- `lmstudio.temperature` (`0.6`, Qwen's thinking-mode value): sent with every
-  call, overriding the model's LM Studio preset.
-- No `max_tokens` is sent: a local call runs to the model's natural end,
-  reasoning included.
+- No sampling parameters and no `max_tokens` are sent. Temperature, top_p,
+  top_k, min_p and the penalties come from the model's per-model defaults in
+  LM Studio (My Models > gear), so set them there from the model card for the
+  mode `lmstudio.think` selects (Qwen3.5/3.8 thinking mode: temperature 1.0,
+  top_p 0.95, top_k 20, min_p 0). A local call runs to the model's natural
+  end, reasoning included.
 - `model_embedding` (`text-embedding-qwen3-embedding-0.6b`): 1024 dimensions.
 
 ## Known limitations

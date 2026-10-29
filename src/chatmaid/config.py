@@ -38,7 +38,6 @@ class LMStudioConfig:
     token_file: Path
     model: str  # the one local model for every call
     think: bool  # reasoning on (schema enforced) or off (empty think block prefilled)
-    temperature: float
     model_embedding: str
     embedding_dim: int
     timeout_s: int
@@ -99,7 +98,6 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
         "token_file": "LMStudio_token.txt",
         "model": "qwen3.5-122b-a10b",
         "think": True,
-        "temperature": 0.6,
         "model_embedding": "text-embedding-qwen3-embedding-0.6b",
         "embedding_dim": 1024,
         "timeout_s": 600,
@@ -153,10 +151,13 @@ def load(path: Path, *, project_root: Path | None = None) -> Config:
             )
     if "model_role" in raw.get("draft", {}):
         raise ConfigError("draft.model_role was removed: every call uses lmstudio.model")
+    if "temperature" in raw.get("lmstudio", {}):
+        raise ConfigError(
+            "lmstudio.temperature was removed: set sampling parameters per model in LM Studio"
+            " (My Models > gear), for the mode lmstudio.think selects"
+        )
     if not isinstance(lm["think"], bool):
         raise ConfigError(f"lmstudio.think must be true or false, got {lm['think']!r}")
-    if isinstance(lm["temperature"], bool) or not isinstance(lm["temperature"], (int, float)):
-        raise ConfigError(f"lmstudio.temperature must be a number, got {lm['temperature']!r}")
     if cl["default_backend"] not in ("codex", "claude"):
         raise ConfigError(
             f"cloud.default_backend must be 'codex' or 'claude', got {cl['default_backend']!r}"
@@ -181,7 +182,6 @@ def load(path: Path, *, project_root: Path | None = None) -> Config:
             token_file=_resolve(lm["token_file"], project_root),
             model=lm["model"],
             think=lm["think"],
-            temperature=float(lm["temperature"]),
             model_embedding=lm["model_embedding"],
             embedding_dim=lm["embedding_dim"],
             timeout_s=lm["timeout_s"],

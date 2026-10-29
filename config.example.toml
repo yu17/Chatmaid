@@ -25,7 +25,8 @@ base_url = "http://127.0.0.1:40090/v1"
 token_file = "LMStudio_token.txt"
 model = "qwen3.5-122b-a10b"  # the one local model: triage, summaries, drafts, style, tagging
 think = true                 # reasoning on; the JSON schema is enforced on every call
-temperature = 0.6            # sent with every call; overrides the model's LM Studio preset
+# No sampling parameters here: set temperature, top_p, top_k, min_p and penalties per
+# model in LM Studio (My Models > gear), for the mode `think` selects.
 model_embedding = "text-embedding-qwen3-embedding-0.6b"
 embedding_dim = 1024
 timeout_s = 600

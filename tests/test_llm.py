@@ -49,7 +49,7 @@ def test_lmstudio_client_thinking_enforces_schema_without_prefill_or_cap(monkeyp
     assert [m["role"] for m in captured["messages"]] == ["system", "user"]
     assert captured["model"] == "m"
     assert "max_tokens" not in captured
-    assert captured["temperature"] == 0.6
+    assert "temperature" not in captured
 
 
 def test_lmstudio_client_think_off_prefills_and_skips_response_format(monkeypatch):
@@ -61,11 +61,13 @@ def test_lmstudio_client_think_off_prefills_and_skips_response_format(monkeypatc
     assert "max_tokens" not in captured
 
 
-def test_lmstudio_client_sends_configured_temperature(monkeypatch):
-    c = LMStudioClient("http://127.0.0.1:1/v1", "tok", temperature=0.9)
+def test_lmstudio_client_leaves_sampling_to_lm_studio(monkeypatch):
+    c = LMStudioClient("http://127.0.0.1:1/v1", "tok", think=False)
     captured = _capture(monkeypatch, c, "{}")
     c.complete(system="s", user="u", model="m")
-    assert captured["temperature"] == 0.9
+    assert set(captured) == {"model", "messages"}
+    with pytest.raises(TypeError):
+        LMStudioClient("http://127.0.0.1:1/v1", "tok", temperature=0.9)
 
 
 def test_lmstudio_client_strips_inline_think_block(monkeypatch):
