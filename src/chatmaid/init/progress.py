@@ -1,14 +1,30 @@
 """One progress line for a long pass: redrawn in place on a terminal, logged otherwise."""
 
 import logging
+import os
 import sys
 import time
+import unicodedata
 from collections import deque
 from collections.abc import Callable
 from typing import TextIO
 
 BAR_WIDTH = 20
 LABEL_WIDTH = 40
+
+
+def _columns(text: str) -> int:
+    """Display columns on a terminal: wide and fullwidth (CJK) characters take two."""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def _cut(text: str, columns: int) -> str:
+    used = 0
+    for i, ch in enumerate(text):
+        used += _columns(ch)
+        if used > columns:
+            return text[:i]
+    return text
 
 
 def _hours(seconds: float) -> str:
@@ -37,8 +53,20 @@ class Progress:
         self.tty = self.stream.isatty()
         self._start = clock()
         self._samples: deque[tuple[int, float]] = deque(maxlen=window)
-        self._width = 0  # longest line drawn so far, to blank out the tail of a longer one
+        self._width = 0  # columns of the longest line drawn so far, to blank a longer tail
         self._drawn = ""  # the last line written on a terminal, padded
+        self._finished = False
+
+    def _room(self) -> int | None:
+        """Columns the line may use without wrapping; None when the size is unknown."""
+        try:
+            return os.get_terminal_size(self.stream.fileno()).columns - 1
+        except (OSError, ValueError, AttributeError):
+            return None
+
+    def _blank_width(self) -> int:
+        room = self._room()
+        return self._width if room is None else min(self._width, room)
 
     def _per_hour(self) -> float | None:
         if len(self._samples) < 2:
@@ -69,8 +97,12 @@ class Progress:
         self._samples.append((done, self.clock()))
         if self.tty:
             text = self._line(done, label)
-            self._width = max(self._width, len(text))
-            self._drawn = text.ljust(self._width)
+            room = self._room()
+            if room is not None:
+                text = _cut(text, room)  # a wrapped line cannot be redrawn with "\r"
+            columns = _columns(text)
+            self._width = max(self._width, columns)
+            self._drawn = text + " " * (self._blank_width() - columns)
             self.stream.write("\r" + self._drawn)
             Progress.active = self
         elif done % self.every == 0 or done == self.total:
@@ -81,13 +113,17 @@ class Progress:
 
     def clear(self) -> None:
         """Blank the drawn line and return the cursor to its start."""
-        self.stream.write("\r" + " " * self._width + "\r")
+        self.stream.write("\r" + " " * self._blank_width() + "\r")
 
     def redraw(self) -> None:
         self.stream.write("\r" + self._drawn)
         self.stream.flush()
 
     def finish(self, summary: str = "") -> None:
+        """End the line and write the summary; later calls do nothing."""
+        if self._finished:
+            return
+        self._finished = True
         if Progress.active is self:
             Progress.active = None
         if self.tty and self._drawn:

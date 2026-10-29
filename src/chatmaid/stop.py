@@ -20,7 +20,8 @@ def stop_on_signal() -> Iterator[None]:
     """Turn the first SIGINT or SIGTERM into `StopRequested` in the main thread.
 
     The first signal puts the previous handlers back before raising, so a second signal gets
-    the default action (exit at once). The previous handlers are restored on exit either way.
+    the previous handler (for SIGINT, Python's default KeyboardInterrupt). The previous
+    handlers are restored on exit either way.
     """
     previous = {sig: signal.getsignal(sig) for sig in _SIGNALS}
 

@@ -305,33 +305,40 @@ class InitPipeline:
         stopped = False
         categories: dict[str, int] = {}
         progress = self._progress("digest", len(rows))
-        for processed, row in enumerate(rows):
-            progress.update(processed, f"{row['id']} {row['title']}")
-            try:
-                n_chunks, n_memories, category, n_long = self._digest_conversation(row["id"], opts)
-            except StopRequested:
-                self.stopped = stopped = True
-                break
-            except _NoCachedText:
-                log.info("digest: conversation %s has no cached message text yet; skipped", row["id"])
-                skipped += 1
-                continue
-            except LLMError as e:
-                log.warning("digest failed for conversation %s: %s", row["id"], e)
-                failed += 1
-                continue
-            done += 1
-            chunks += n_chunks
-            memories += n_memories
-            long += n_long
-            stored = category if category is not None else row["category"]  # COALESCE on write
-            key = stored or "unknown"
-            categories[key] = categories.get(key, 0) + 1
-        store.refresh_sender_stats()  # picks up the categories just stored
-        stats = DigestStats(
-            done, chunks, memories, failed, skipped, long, categories, stopped=stopped
-        )
-        progress.finish(_digest_summary(stats))
+        summary = "digest interrupted"  # replaced by the stats line on a normal exit
+        try:
+            for processed, row in enumerate(rows):
+                progress.update(processed, f"{row['id']} {row['title']}")
+                try:
+                    result = self._digest_conversation(row["id"], opts)
+                except StopRequested:
+                    self.stopped = stopped = True
+                    break
+                except _NoCachedText:
+                    log.info(
+                        "digest: conversation %s has no cached message text yet; skipped", row["id"]
+                    )
+                    skipped += 1
+                    continue
+                except LLMError as e:
+                    log.warning("digest failed for conversation %s: %s", row["id"], e)
+                    failed += 1
+                    continue
+                n_chunks, n_memories, category, n_long = result
+                done += 1
+                chunks += n_chunks
+                memories += n_memories
+                long += n_long
+                stored = category if category is not None else row["category"]  # COALESCE on write
+                key = stored or "unknown"
+                categories[key] = categories.get(key, 0) + 1
+            store.refresh_sender_stats()  # picks up the categories just stored
+            stats = DigestStats(
+                done, chunks, memories, failed, skipped, long, categories, stopped=stopped
+            )
+            summary = _digest_summary(stats)
+        finally:
+            progress.finish(summary)
         return stats
 
     def _complete_json(self, prompt: prompts.Prompt, user: str, model: str) -> dict:

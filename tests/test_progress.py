@@ -1,5 +1,7 @@
 import io
 import logging
+import os
+import unicodedata
 
 from chatmaid.init.progress import Progress, ProgressLogHandler
 
@@ -70,3 +72,33 @@ def test_log_record_clears_and_redraws_the_line():
     _logger(plain).warning("plain record")
     q.finish()
     assert "plain record\n" in plain.getvalue() and "\r" not in plain.getvalue()
+
+
+def _columns(text):
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+class SizedTty(Tty):
+    def fileno(self):
+        return 99
+
+
+def test_progress_cuts_to_terminal_width(monkeypatch):
+    monkeypatch.setattr(os, "get_terminal_size", lambda fd: os.terminal_size((60, 20)))
+    out = SizedTty()
+    p = Progress("digest", 4, stream=out)
+    p.update(1, "中文标题" * 10)
+    line = out.getvalue().removeprefix("\r")
+    assert line.startswith("digest 1/4") and _columns(line) <= 59
+    p.finish()
+
+
+def test_progress_finish_is_idempotent_and_clears_active():
+    out = Tty()
+    p = Progress("digest", 4, stream=out)
+    p.update(1, "x")
+    assert Progress.active is p
+    p.finish("summary")
+    p.finish("summary")
+    assert Progress.active is None
+    assert out.getvalue().count("summary\n") == 1 and out.getvalue().endswith("summary\n")

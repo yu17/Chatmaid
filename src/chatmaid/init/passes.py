@@ -46,25 +46,29 @@ def run_style(
     done: dict[str, int] = {}
     eligible = [(lang, samples) for lang, samples in groups.items() if len(samples) >= min_samples]
     progress = pipeline._progress("style", len(eligible))
-    for n, (language, samples) in enumerate(eligible):
-        progress.update(n, language)
-        user = "\n".join(
-            f"{i}. {text[:STYLE_SAMPLE_CHARS]}" for i, (_, text) in enumerate(samples, start=1)
-        )
-        try:
-            out = pipeline._complete_json(prompt, user, model)
-        except StopRequested:
-            pipeline.stopped = True
-            break
-        except LLMError as e:
-            log.warning("style profile for %s failed: %s", language, e)
-            continue
-        pipeline.store.set_style_profile(
-            language, "default", out["profile"], [key for key, _ in samples]
-        )
-        done[language] = len(samples)
-    head = "style stopped" if pipeline.stopped else "style done"
-    progress.finish(f"{head}: {len(done)} of {len(eligible)} languages profiled")
+    summary = "style interrupted"  # replaced by the counts on a normal exit
+    try:
+        for n, (language, samples) in enumerate(eligible):
+            progress.update(n, language)
+            user = "\n".join(
+                f"{i}. {text[:STYLE_SAMPLE_CHARS]}" for i, (_, text) in enumerate(samples, start=1)
+            )
+            try:
+                out = pipeline._complete_json(prompt, user, model)
+            except StopRequested:
+                pipeline.stopped = True
+                break
+            except LLMError as e:
+                log.warning("style profile for %s failed: %s", language, e)
+                continue
+            pipeline.store.set_style_profile(
+                language, "default", out["profile"], [key for key, _ in samples]
+            )
+            done[language] = len(samples)
+        head = "style stopped" if pipeline.stopped else "style done"
+        summary = f"{head}: {len(done)} of {len(eligible)} languages profiled"
+    finally:
+        progress.finish(summary)
     return done
 
 
@@ -89,19 +93,23 @@ def run_embed(pipeline: "InitPipeline", opts: "InitOptions") -> int:
     starts = range(0, len(pending), EMBED_BATCH)
     progress = pipeline._progress("embed", len(starts))
     embedded = 0
-    for n, start in enumerate(starts):
-        progress.update(n, f"{embedded} of {len(pending)} texts")
-        batch = pending[start : start + EMBED_BATCH]
-        try:
-            vectors = pipeline.llm.embed([text for _, _, text, _ in batch], model=model)
-        except StopRequested:
-            pipeline.stopped = True
-            break
-        if len(vectors) != len(batch) or any(len(v) != dim for v in vectors):
-            raise LLMError(f"embedding model returned vectors that are not {dim}-dimensional")
-        for (kind, ref_id, _, digest), vector in zip(batch, vectors):
-            store.upsert_embedding(kind, ref_id, digest, vector)
-        embedded += len(batch)
-    head = "embed stopped" if pipeline.stopped else "embed done"
-    progress.finish(f"{head}: {embedded} of {len(pending)} texts embedded")
+    summary = "embed interrupted"  # replaced by the counts on a normal exit
+    try:
+        for n, start in enumerate(starts):
+            progress.update(n, f"{embedded} of {len(pending)} texts")
+            batch = pending[start : start + EMBED_BATCH]
+            try:
+                vectors = pipeline.llm.embed([text for _, _, text, _ in batch], model=model)
+            except StopRequested:
+                pipeline.stopped = True
+                break
+            if len(vectors) != len(batch) or any(len(v) != dim for v in vectors):
+                raise LLMError(f"embedding model returned vectors that are not {dim}-dimensional")
+            for (kind, ref_id, _, digest), vector in zip(batch, vectors):
+                store.upsert_embedding(kind, ref_id, digest, vector)
+            embedded += len(batch)
+        head = "embed stopped" if pipeline.stopped else "embed done"
+        summary = f"{head}: {embedded} of {len(pending)} texts embedded"
+    finally:
+        progress.finish(summary)
     return embedded

@@ -6,6 +6,8 @@ from dataclasses import replace
 import pytest
 
 from chatmaid.init.pipeline import InitOptions, InitPipeline
+from chatmaid.init.progress import Progress
+from chatmaid.llm.base import LLMError
 from chatmaid.llm.fake import CANNED, FakeLLM
 from chatmaid.llm.prompts import load
 from chatmaid.stop import StopRequested
@@ -294,3 +296,28 @@ def test_progress_is_written_to_the_given_stream(ingested_env):
     p = InitPipeline(env.store, env.connector, FakeLLM(PLAIN), env.config, progress_stream=out)
     p.digest(InitOptions())
     assert out.getvalue().startswith("digest ")
+
+
+class _Tty(io.StringIO):
+    def isatty(self):
+        return True
+
+
+def test_digest_finishes_progress_when_refresh_raises(ingested_env, monkeypatch):
+    store = ingested_env.store
+    calls = {"n": 0}
+    orig = store.refresh_sender_stats
+
+    def refresh():
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise LLMError("boom")
+        return orig()
+
+    monkeypatch.setattr(store, "refresh_sender_stats", refresh)
+    out = _Tty()
+    env = ingested_env
+    p = InitPipeline(env.store, env.connector, FakeLLM(PLAIN), env.config, progress_stream=out)
+    with pytest.raises(LLMError):
+        p.digest(InitOptions())
+    assert Progress.active is None and out.getvalue().endswith("\n")
