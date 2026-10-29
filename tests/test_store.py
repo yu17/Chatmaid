@@ -3,6 +3,7 @@ import sqlite3
 from importlib import resources
 
 import pytest
+import sqlite_vec
 
 from chatmaid.model import make_preview
 from chatmaid.store import Store
@@ -11,7 +12,7 @@ from chatmaid.store import Store
 def test_schema_applied(tmp_path):
     s = Store(tmp_path / "i.sqlite", embedding_dim=4)
     try:
-        assert s.counts() == {"identities": 0, "contacts": 0, "conversations": 0, "messages": 0, "memories": 0, "embeddings": 0, "events": 0, "drafts": 0, "cloud_calls": 0}
+        assert s.counts() == {"identities": 0, "contacts": 0, "conversations": 0, "messages": 0, "memories": 0, "embeddings": 0, "events": 0, "drafts": 0, "cloud_calls": 0, "senders": 0}
     finally:
         s.close()
 
@@ -273,7 +274,50 @@ def test_interrupted_upgrade_is_retried_cleanly(tmp_path, monkeypatch):
         Store(path, embedding_dim=4)
     s = Store(path, embedding_dim=4)
     try:
-        assert s._conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert s._conn.execute("PRAGMA user_version").fetchone()[0] == Store.SCHEMA_VERSION
         assert s._conn.execute("SELECT name FROM sqlite_master WHERE name='draft'").fetchone()
     finally:
         s.close()
+
+
+def test_v3_upgrade_drops_vectors_and_keeps_summaries(tmp_path):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.enable_load_extension(True); sqlite_vec.load(conn)
+    for n in (1, 2):
+        conn.executescript(resources.files("chatmaid.store").joinpath(f"schema_v{n}.sql").read_text())
+    conn.execute("CREATE VIRTUAL TABLE vec_embedding USING vec0(item_id INTEGER PRIMARY KEY, embedding float[4])")
+    conn.execute("INSERT INTO conversation (platform, key, title, kind, summary) VALUES ('email','k','t','thread','S')")
+    conn.execute("INSERT INTO embedding_item (kind, ref_id, text_hash) VALUES ('conversation', 1, 'h')")
+    conn.execute("INSERT INTO vec_embedding (item_id, embedding) VALUES (1, ?)", (sqlite_vec.serialize_float32([1,0,0,0]),))
+    conn.commit(); conn.close()
+    s = Store(path, embedding_dim=4)
+    try:
+        assert s.counts()["embeddings"] == 0 and s.embedding_hash("conversation", 1) is None
+        assert s.conversation(1)["summary"] == "S" and s.conversation(1)["category"] is None
+        s.upsert_embedding("conversation", 1, "h", [1.0, 0, 0, 0])  # the partitioned table works
+        assert s.search_embeddings([1.0, 0, 0, 0], k=1, kind="conversation")[0][:2] == ("conversation", 1)
+    finally:
+        s.close()
+
+
+def test_search_embeddings_kind_partition_ignores_other_kinds(store):
+    for i in range(1, 201):
+        store.upsert_embedding("memory", i, f"h{i}", [1.0, 0.0, 0.0, 0.0])
+    store.upsert_embedding("owner_message", 7, "o", [0.0, 0.0, 1.0, 0.0])
+    assert store.search_embeddings([1.0, 0, 0, 0], k=1, kind="owner_message") == [("owner_message", 7, pytest.approx(1.4142, abs=1e-3))]
+
+
+def test_set_conversation_summary_category_and_merge_clears_it(store, sample_message):
+    a = store.upsert_conversation("email", "ka", "A", "thread")
+    b = store.upsert_conversation("email", "kb", "B", "thread")
+    store.set_conversation_summary(a, "S", category="event")
+    store.set_conversation_summary(a, "S2")  # COALESCE keeps the category
+    assert store.conversation(a)["category"] == "event"
+    assert [c["id"] for c in store.conversations(category="event", exclude_bulk=False)] == [a]
+    store.set_conversation_category(a, None)
+    assert store.conversation(a)["category"] is None
+    store.set_conversation_category(a, "promotional")
+    with store.transaction():
+        store.merge_conversations(a, b)
+    assert store.conversation(a)["category"] is None

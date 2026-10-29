@@ -22,6 +22,7 @@ _COUNT_TABLES = {
     "events": "event_log",
     "drafts": "draft",
     "cloud_calls": "cloud_call",
+    "senders": "sender_stat",
 }
 
 
@@ -34,7 +35,7 @@ def _like_escape(text: str) -> str:
 
 
 class Store:
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(self, path: Path, *, embedding_dim: int):
         # autocommit=True: no implicit transactions, and executescript() does not COMMIT an
@@ -52,7 +53,7 @@ class Store:
                 self._upgrade_to(n)
             self._conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS vec_embedding USING vec0("
-                f"item_id INTEGER PRIMARY KEY, embedding float[{int(embedding_dim)}])"
+                f"item_id INTEGER PRIMARY KEY, kind TEXT partition key, embedding float[{int(embedding_dim)}])"
             )
         except BaseException:
             self._conn.close()
@@ -183,7 +184,7 @@ class Store:
         c.execute("DELETE FROM conversation WHERE id = ?", (drop_id,))
         c.execute(
             "UPDATE conversation SET summary = NULL, summary_updated_at = NULL, events_json = NULL, "
-            "tracked = 1 "
+            "category = NULL, tracked = 1 "
             "WHERE id = ?",
             (keep_id,),
         )
@@ -209,17 +210,25 @@ class Store:
         *,
         tier: str | None = None,
         events: list[dict] | None = None,
+        category: str | None = None,
     ) -> None:
         self._conn.execute(
             "UPDATE conversation SET summary = ?, summary_updated_at = ?, "
-            "tier = COALESCE(?, tier), events_json = COALESCE(?, events_json) WHERE id = ?",
+            "tier = COALESCE(?, tier), events_json = COALESCE(?, events_json), "
+            "category = COALESCE(?, category) WHERE id = ?",
             (
                 summary,
                 _now(),
                 tier,
                 None if events is None else json.dumps(events, ensure_ascii=False),
+                category,
                 conversation_id,
             ),
+        )
+
+    def set_conversation_category(self, conversation_id: int, category: str | None) -> None:
+        self._conn.execute(
+            "UPDATE conversation SET category = ? WHERE id = ?", (category, conversation_id)
         )
 
     def add_participant(self, conversation_id: int, contact_id: int) -> None:
@@ -247,8 +256,13 @@ class Store:
         limit: int | None = None,
         needing_summary: bool | None = None,
         exclude_bulk: bool = True,
+        category: str | None = None,
     ) -> list[sqlite3.Row]:
         where = []
+        params: list = []
+        if category is not None:
+            where.append("category = ?")
+            params.append(category)
         if exclude_bulk:
             where.append("bulk = 0")
         if needing_summary is True:
@@ -260,10 +274,9 @@ class Store:
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY last_message_at DESC"
-        params: tuple = ()
         if limit is not None:
             sql += " LIMIT ?"
-            params = (limit,)
+            params.append(limit)
         return self._conn.execute(sql, params).fetchall()
 
     # --- messages ---
@@ -736,8 +749,8 @@ class Store:
                     (kind, ref_id, text_hash),
                 ).lastrowid
             self._conn.execute(
-                "INSERT INTO vec_embedding (item_id, embedding) VALUES (?, ?)",
-                (item_id, sqlite_vec.serialize_float32(vector)),
+                "INSERT INTO vec_embedding (item_id, kind, embedding) VALUES (?, ?, ?)",
+                (item_id, kind, sqlite_vec.serialize_float32(vector)),
             )
             self._conn.execute("COMMIT")
         except BaseException:
@@ -761,18 +774,15 @@ class Store:
     def search_embeddings(
         self, vector: list[float], *, k: int = 10, kind: str | None = None
     ) -> list[tuple[str, int, float]]:
-        # sqlite-vec 0.1.x needs `k = ?` inside the KNN query; a kind filter is applied
-        # after the join, so over-fetch to keep k results when filtering.
-        fetch = k if kind is None else max(k * 10, 100)
+        # sqlite-vec 0.1.x needs `k = ?` inside the KNN query; kind is a partition key, so the
+        # filter applies inside the KNN and exactly k rows come back.
         rows = self._conn.execute(
             "SELECT e.kind, e.ref_id, v.distance FROM "
-            "(SELECT item_id, distance FROM vec_embedding WHERE embedding MATCH ? AND k = ? "
-            "ORDER BY distance) v JOIN embedding_item e ON e.id = v.item_id "
-            + ("WHERE e.kind = ? " if kind is not None else "")
-            + "ORDER BY v.distance LIMIT ?",
-            (sqlite_vec.serialize_float32(vector), fetch)
-            + ((kind,) if kind is not None else ())
-            + (k,),
+            "(SELECT item_id, distance FROM vec_embedding WHERE embedding MATCH ? AND k = ?"
+            + (" AND kind = ?" if kind is not None else "")
+            + " ORDER BY distance) v JOIN embedding_item e ON e.id = v.item_id "
+            "ORDER BY v.distance",
+            (sqlite_vec.serialize_float32(vector), k) + ((kind,) if kind is not None else ()),
         ).fetchall()
         return [(r["kind"], r["ref_id"], r["distance"]) for r in rows]
 

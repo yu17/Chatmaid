@@ -23,7 +23,7 @@ def test_v1_database_is_upgraded_to_v2(tmp_path):
     conn.close()
     s = Store(path, embedding_dim=4)
     try:
-        assert s._conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert s._conn.execute("PRAGMA user_version").fetchone()[0] == Store.SCHEMA_VERSION
         assert s._conn.execute("SELECT name FROM sqlite_master WHERE name='draft'").fetchone()
     finally:
         s.close()
