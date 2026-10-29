@@ -29,6 +29,7 @@ from chatmaid.lookup import search_history
 from chatmaid.llm.fake import CANNED
 from chatmaid.model import SourceRef
 from chatmaid.reply.flow import ReplyFlow
+from chatmaid.stop import StopRequested, stop_on_signal
 from chatmaid.store import Store
 
 
@@ -132,7 +133,7 @@ def _init_command(args: argparse.Namespace) -> int:
 def _init_locked(args: argparse.Namespace, cfg) -> int:
     accounts = load_accounts(cfg.email.evolution_config_dir, cfg.email.accounts)
     owner = OwnerIdentity.from_accounts(accounts, cfg.owner.extra_addresses, cfg.owner.aliases)
-    passes = ("ingest", "digest", "style", "embed") if args.pass_name == "all" else (args.pass_name,)
+    passes = InitOptions().passes if args.pass_name == "all" else (args.pass_name,)
     if args.fake_llm:
         llm = FakeLLM()
     elif all(name == "ingest" for name in passes):
@@ -144,19 +145,32 @@ def _init_locked(args: argparse.Namespace, cfg) -> int:
             print(str(e), file=sys.stderr)
             return 1
     connector = EvolutionConnector(cfg.email, accounts, owner)
-    opts = InitOptions(since=args.since, limit_conversations=args.limit, passes=passes)
+    opts = InitOptions(
+        since=args.since,
+        limit_conversations=args.limit,
+        skip_bulk=args.skip_bulk,
+        queue_group=args.queue_group,
+        passes=passes,
+    )
     store = _open_store(cfg)
+    pipeline = InitPipeline(store, connector, llm, cfg)
     try:
         if args.reset_checkpoints:
             print(f"cleared {store.clear_checkpoints('ingest')} ingest checkpoints")
-        for name, stats in InitPipeline(store, connector, llm, cfg).run(opts).items():
-            print(f"{name}: {stats}")
+        with stop_on_signal():
+            for name, stats in pipeline.run(opts).items():
+                print(f"{name}: {stats}")
+    except StopRequested:  # outside a pass's own catch (e.g. mid-ingest); the open batch rolled back
+        pipeline.stopped = True
     except LLMError as e:
         print(f"init failed: {e}", file=sys.stderr)
         return 1
     finally:
         store.close()
         connector.close()
+    if pipeline.stopped:
+        print("stopped; run the same command to resume", file=sys.stderr)
+        return 130
     return 0
 
 
@@ -168,6 +182,11 @@ def register_init(subparsers) -> None:
         "--pass", dest="pass_name", choices=["ingest", "digest", "style", "embed", "all"], default="all"
     )
     p.add_argument("--reset-checkpoints", action="store_true", help="forget ingest checkpoints first")
+    p.add_argument("--skip-bulk", action="store_true", help="digest: leave bulk conversations out")
+    p.add_argument(
+        "--queue-group", type=int, choices=range(1, 6), default=None, metavar="1..5",
+        help="digest: only this priority group of the queue",
+    )
     p.add_argument("--fake-llm", action="store_true", help="use the canned FakeLLM")
     p.set_defaults(handler=_init_command)
 

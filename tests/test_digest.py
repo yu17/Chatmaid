@@ -1,3 +1,4 @@
+import io
 import json
 import sqlite3
 from dataclasses import replace
@@ -5,8 +6,9 @@ from dataclasses import replace
 import pytest
 
 from chatmaid.init.pipeline import InitOptions, InitPipeline
-from chatmaid.llm.fake import FakeLLM
+from chatmaid.llm.fake import CANNED, FakeLLM
 from chatmaid.llm.prompts import load
+from chatmaid.stop import StopRequested
 
 PLAIN = {
     "chunk_summary": '{"category":"conversation","summary":"S1","events":[],"facts":[]}',
@@ -241,3 +243,54 @@ def test_digest_counts_long_summaries(ingested_env):
                    "rolling_summary": '{"summary":"S"}'})
     st = pipeline(ingested_env, llm).digest(InitOptions(limit_conversations=1))
     assert st.long == 1 and st.conversations == 1
+
+
+def test_digest_stops_between_conversations_and_resumes(ingested_env):
+    llm = FakeLLM(PLAIN)
+    n = {"calls": 0}
+    orig = llm.complete
+
+    def flaky(**kw):
+        n["calls"] += 1
+        if n["calls"] == 2:
+            raise StopRequested()
+        return orig(**kw)
+
+    llm.complete = flaky
+    p = pipeline(ingested_env, llm)
+    st = p.digest(InitOptions())
+    assert st.stopped and p.stopped and st.conversations == 1
+    st2 = pipeline(ingested_env, FakeLLM(PLAIN)).digest(InitOptions())
+    assert not st2.stopped and st2.conversations >= 1 and st2.skipped == 1
+
+
+def test_stop_inside_chunk_transaction_rolls_back(ingested_env, monkeypatch):
+    store = ingested_env.store
+
+    def boom(task, key, state):
+        raise StopRequested()
+
+    monkeypatch.setattr(store, "set_checkpoint", boom)
+    st = pipeline(ingested_env, FakeLLM(dict(CANNED))).digest(InitOptions(limit_conversations=1))
+    assert st.stopped and st.conversations == 0 and store.memories() == []
+    assert all(c["summary"] is None for c in store.conversations(exclude_bulk=False))
+
+
+def test_run_stops_after_a_stopped_pass(ingested_env):
+    llm = FakeLLM(PLAIN)
+
+    def stop_now(**kw):
+        raise StopRequested()
+
+    llm.complete = stop_now
+    p = pipeline(ingested_env, llm)
+    out = p.run(InitOptions(passes=("digest", "embed")))
+    assert list(out) == ["digest"] and p.stopped
+
+
+def test_progress_is_written_to_the_given_stream(ingested_env):
+    out = io.StringIO()
+    env = ingested_env
+    p = InitPipeline(env.store, env.connector, FakeLLM(PLAIN), env.config, progress_stream=out)
+    p.digest(InitOptions())
+    assert out.getvalue().startswith("digest ")

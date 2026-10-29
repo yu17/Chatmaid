@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from chatmaid.init.chunking import detect_language
 from chatmaid.llm import prompts
 from chatmaid.llm.base import LLMError
+from chatmaid.stop import StopRequested
 
 if TYPE_CHECKING:
     from chatmaid.init.pipeline import InitOptions, InitPipeline
@@ -43,14 +44,18 @@ def run_style(
     prompt = prompts.load("style_profile")
     model = pipeline.cfg.lmstudio.model
     done: dict[str, int] = {}
-    for language, samples in groups.items():
-        if len(samples) < min_samples:
-            continue
+    eligible = [(lang, samples) for lang, samples in groups.items() if len(samples) >= min_samples]
+    progress = pipeline._progress("style", len(eligible))
+    for n, (language, samples) in enumerate(eligible):
+        progress.update(n, language)
         user = "\n".join(
             f"{i}. {text[:STYLE_SAMPLE_CHARS]}" for i, (_, text) in enumerate(samples, start=1)
         )
         try:
             out = pipeline._complete_json(prompt, user, model)
+        except StopRequested:
+            pipeline.stopped = True
+            break
         except LLMError as e:
             log.warning("style profile for %s failed: %s", language, e)
             continue
@@ -58,6 +63,8 @@ def run_style(
             language, "default", out["profile"], [key for key, _ in samples]
         )
         done[language] = len(samples)
+    head = "style stopped" if pipeline.stopped else "style done"
+    progress.finish(f"{head}: {len(done)} of {len(eligible)} languages profiled")
     return done
 
 
@@ -79,11 +86,22 @@ def run_embed(pipeline: "InitPipeline", opts: "InitOptions") -> int:
 
     dim = pipeline.cfg.lmstudio.embedding_dim
     model = pipeline.cfg.lmstudio.model_embedding
-    for start in range(0, len(pending), EMBED_BATCH):
+    starts = range(0, len(pending), EMBED_BATCH)
+    progress = pipeline._progress("embed", len(starts))
+    embedded = 0
+    for n, start in enumerate(starts):
+        progress.update(n, f"{embedded} of {len(pending)} texts")
         batch = pending[start : start + EMBED_BATCH]
-        vectors = pipeline.llm.embed([text for _, _, text, _ in batch], model=model)
+        try:
+            vectors = pipeline.llm.embed([text for _, _, text, _ in batch], model=model)
+        except StopRequested:
+            pipeline.stopped = True
+            break
         if len(vectors) != len(batch) or any(len(v) != dim for v in vectors):
             raise LLMError(f"embedding model returned vectors that are not {dim}-dimensional")
         for (kind, ref_id, _, digest), vector in zip(batch, vectors):
             store.upsert_embedding(kind, ref_id, digest, vector)
-    return len(pending)
+        embedded += len(batch)
+    head = "embed stopped" if pipeline.stopped else "embed done"
+    progress.finish(f"{head}: {embedded} of {len(pending)} texts embedded")
+    return embedded

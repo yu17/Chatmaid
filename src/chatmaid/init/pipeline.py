@@ -5,6 +5,7 @@ import sqlite3
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import TextIO
 
 from chatmaid.config import Config
 from chatmaid.connectors.base import Connector
@@ -18,11 +19,13 @@ from chatmaid.init.categories import (
     summary_limit,
 )
 from chatmaid.init.chunking import chunk_messages, count_words
+from chatmaid.init.progress import Progress
 from chatmaid.llm import prompts
 from chatmaid.llm.base import LLM, LLMError
 from chatmaid.llm.jsoncall import complete_json
 from chatmaid.model import NormalizedMessage
 from chatmaid.quoting import strip_quoted
+from chatmaid.stop import StopRequested
 from chatmaid.store import Store
 from chatmaid.threads import ThreadIndex, strip_subject_prefixes, thread_fallback_key
 
@@ -39,7 +42,7 @@ class InitOptions:
     skip_bulk: bool = False
     queue_group: int | None = None  # digest only this priority group of `Store.digest_queue`
     chunk_chars: int = 9000
-    passes: tuple[str, ...] = ("ingest", "digest", "style", "embed")
+    passes: tuple[str, ...] = ("ingest", "style", "digest", "embed")
 
 
 @dataclass(frozen=True)
@@ -123,6 +126,16 @@ class DigestStats:
     skipped: int  # no cached message text yet: left pending, nothing sent to the model
     long: int = 0  # chunk summaries over their category's word limit
     categories: dict[str, int] = field(default_factory=dict)  # "unknown" for no category
+    stopped: bool = False  # a stop signal ended the pass early; the next run resumes
+
+
+def _digest_summary(st: DigestStats) -> str:
+    cats = " ".join(f"{k}={v}" for k, v in sorted(st.categories.items())) or "-"
+    head = "digest stopped" if st.stopped else "digest done"
+    return (
+        f"{head}: {st.conversations} summarized, {st.failed} failed, {st.skipped} skipped, "
+        f"{st.chunks} chunks, {st.memories} memories, {st.long} long; categories {cats}"
+    )
 
 
 class _NoCachedText(Exception):
@@ -170,11 +183,24 @@ def _folder_key(msg: NormalizedMessage) -> str:
 
 
 class InitPipeline:
-    def __init__(self, store: Store, connector: Connector, llm: LLM, cfg: Config):
+    def __init__(
+        self,
+        store: Store,
+        connector: Connector,
+        llm: LLM,
+        cfg: Config,
+        *,
+        progress_stream: TextIO | None = None,
+    ):
         self.store = store
         self.connector = connector
         self.llm = llm
         self.cfg = cfg
+        self.progress_stream = progress_stream  # None: stderr
+        self.stopped = False  # set by a pass that caught StopRequested
+
+    def _progress(self, name: str, total: int) -> Progress:
+        return Progress(name, total, stream=self.progress_stream)
 
     def run(self, opts: InitOptions) -> dict[str, object]:
         results: dict[str, object] = {}
@@ -189,6 +215,8 @@ class InitPipeline:
                 results[name] = self.embed(opts)
             else:
                 raise ValueError(f"unknown pass {name!r}")
+            if self.stopped:
+                break
         return results
 
     # -- passes 3 and 4 (see passes.py) ----------------------------------
@@ -274,10 +302,16 @@ class InitPipeline:
             exclude_bulk=opts.skip_bulk, limit=opts.limit_conversations, group=opts.queue_group
         )
         done = chunks = memories = failed = skipped = long = 0
+        stopped = False
         categories: dict[str, int] = {}
-        for row in rows:
+        progress = self._progress("digest", len(rows))
+        for processed, row in enumerate(rows):
+            progress.update(processed, f"{row['id']} {row['title']}")
             try:
                 n_chunks, n_memories, category, n_long = self._digest_conversation(row["id"], opts)
+            except StopRequested:
+                self.stopped = stopped = True
+                break
             except _NoCachedText:
                 log.info("digest: conversation %s has no cached message text yet; skipped", row["id"])
                 skipped += 1
@@ -294,7 +328,11 @@ class InitPipeline:
             key = stored or "unknown"
             categories[key] = categories.get(key, 0) + 1
         store.refresh_sender_stats()  # picks up the categories just stored
-        return DigestStats(done, chunks, memories, failed, skipped, long, categories)
+        stats = DigestStats(
+            done, chunks, memories, failed, skipped, long, categories, stopped=stopped
+        )
+        progress.finish(_digest_summary(stats))
+        return stats
 
     def _complete_json(self, prompt: prompts.Prompt, user: str, model: str) -> dict:
         return complete_json(self.llm, prompt, user, model)

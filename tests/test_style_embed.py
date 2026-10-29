@@ -6,6 +6,7 @@ from chatmaid.init.pipeline import InitOptions, InitPipeline
 from chatmaid.llm.base import LLMError
 from chatmaid.llm.fake import FakeLLM
 from chatmaid.llm.prompts import load
+from chatmaid.stop import StopRequested
 
 
 def test_style_prompt_loads():
@@ -126,3 +127,23 @@ def test_json_shape_suffix_always_appended(ingested_env):
     pipe = InitPipeline(ingested_env.store, ingested_env.connector, llm, ingested_env.config)
     pipe._complete_json(load("rolling_summary"), "u", "m")
     assert llm.calls[0]["user"] == 'u\n\nReply with exactly this JSON shape: {"summary": "<string>"}'
+
+
+def test_embed_stop_keeps_completed_batches(ingested_env):
+    store = ingested_env.store
+    for i in range(40):
+        store.add_memory(kind="fact", text=f"m{i}", source_ref="r", observed_at=None)
+    llm = FakeLLM(dim=4)
+    orig = llm.embed
+    n = {"batches": 0}
+
+    def flaky(texts, *, model):
+        n["batches"] += 1
+        if n["batches"] == 2:
+            raise StopRequested()
+        return orig(texts, model=model)
+
+    llm.embed = flaky
+    pipe = InitPipeline(store, ingested_env.connector, llm, ingested_env.config)
+    assert pipe.embed(InitOptions()) == 32 and pipe.stopped
+    assert store.counts()["embeddings"] == 32

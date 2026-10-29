@@ -3,7 +3,7 @@ import re
 import pytest
 
 from chatmaid.cli import main
-from chatmaid.init.pipeline import InitOptions, InitPipeline
+from chatmaid.init.pipeline import DigestStats, InitOptions, InitPipeline
 from chatmaid.llm.base import LLMError
 from chatmaid.llm.fake import FakeLLM
 from chatmaid.store import Store
@@ -113,3 +113,13 @@ def test_cli_llm_check_builds_client_from_config(fake_env, monkeypatch, capsys):
         "base_url": fake_env.config.lmstudio.base_url, "token": "tok",
         "timeout_s": 600, "think": True,
     }
+
+
+def test_cli_init_stopped_exits_130(fake_env, monkeypatch, capsys):
+    def stopped_digest(self, opts):
+        self.stopped = True
+        return DigestStats(0, 0, 0, 0, 0, stopped=True)
+
+    monkeypatch.setattr("chatmaid.cli.InitPipeline.digest", stopped_digest)
+    rc = main(["--config", str(fake_env.config_path), "init", "--pass", "digest", "--fake-llm"])
+    assert rc == 130 and "stopped; run the same command to resume" in capsys.readouterr().err
