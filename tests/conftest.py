@@ -301,7 +301,7 @@ def digested_env(ingested_env):
 
     llm = FakeLLM(
         {
-            "chunk_summary": '{"summary":"S1","events":[],"facts":[{"about":"Ann","text":"likes tea"}]}',
+            "chunk_summary": '{"category":"conversation","summary":"S1","events":[],"facts":[{"about":"Ann","text":"likes tea"}]}',
             "rolling_summary": '{"summary":"S"}',
         },
         dim=4,

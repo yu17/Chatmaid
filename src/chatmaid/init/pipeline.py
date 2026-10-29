@@ -3,17 +3,26 @@
 import logging
 import sqlite3
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from chatmaid.config import Config
 from chatmaid.connectors.base import Connector
 from chatmaid.init import passes
-from chatmaid.init.chunking import chunk_messages
+from chatmaid.init.categories import (
+    allows_events,
+    allows_facts,
+    most_engaged,
+    normalize_category,
+    sender_line,
+    summary_limit,
+)
+from chatmaid.init.chunking import chunk_messages, count_words
 from chatmaid.llm import prompts
 from chatmaid.llm.base import LLM, LLMError
 from chatmaid.llm.jsoncall import complete_json
 from chatmaid.model import NormalizedMessage
+from chatmaid.quoting import strip_quoted
 from chatmaid.store import Store
 from chatmaid.threads import ThreadIndex, strip_subject_prefixes, thread_fallback_key
 
@@ -27,7 +36,8 @@ INGEST_BATCH = 200  # messages per store transaction
 class InitOptions:
     since: int | None = None
     limit_conversations: int | None = None
-    skip_bulk: bool = True
+    skip_bulk: bool = False
+    queue_group: int | None = None  # digest only this priority group of `Store.digest_queue`
     chunk_chars: int = 9000
     passes: tuple[str, ...] = ("ingest", "digest", "style", "embed")
 
@@ -111,6 +121,8 @@ class DigestStats:
     memories: int
     failed: int
     skipped: int  # no cached message text yet: left pending, nothing sent to the model
+    long: int = 0  # chunk summaries over their category's word limit
+    categories: dict[str, int] = field(default_factory=dict)  # "unknown" for no category
 
 
 class _NoCachedText(Exception):
@@ -256,13 +268,16 @@ class InitPipeline:
 
     # -- pass 2: digest -------------------------------------------------
     def digest(self, opts: InitOptions) -> DigestStats:
-        rows = self.store.conversations(
-            needing_summary=True, exclude_bulk=opts.skip_bulk, limit=opts.limit_conversations
+        store = self.store
+        store.refresh_sender_stats()  # the sender lines read these
+        rows = store.digest_queue(
+            exclude_bulk=opts.skip_bulk, limit=opts.limit_conversations, group=opts.queue_group
         )
-        done = chunks = memories = failed = skipped = 0
+        done = chunks = memories = failed = skipped = long = 0
+        categories: dict[str, int] = {}
         for row in rows:
             try:
-                n_chunks, n_memories = self._digest_conversation(row["id"], opts)
+                n_chunks, n_memories, category, n_long = self._digest_conversation(row["id"], opts)
             except _NoCachedText:
                 log.info("digest: conversation %s has no cached message text yet; skipped", row["id"])
                 skipped += 1
@@ -274,12 +289,20 @@ class InitPipeline:
             done += 1
             chunks += n_chunks
             memories += n_memories
-        return DigestStats(done, chunks, memories, failed, skipped)
+            long += n_long
+            stored = category if category is not None else row["category"]  # COALESCE on write
+            key = stored or "unknown"
+            categories[key] = categories.get(key, 0) + 1
+        store.refresh_sender_stats()  # picks up the categories just stored
+        return DigestStats(done, chunks, memories, failed, skipped, long, categories)
 
     def _complete_json(self, prompt: prompts.Prompt, user: str, model: str) -> dict:
         return complete_json(self.llm, prompt, user, model)
 
-    def _digest_conversation(self, cid: int, opts: InitOptions) -> tuple[int, int]:
+    def _digest_conversation(
+        self, cid: int, opts: InitOptions
+    ) -> tuple[int, int, str | None, int]:
+        """Summarize one conversation; returns (chunks done, memories, category, long summaries)."""
         store = self.store
         fetched = []
         for ref, _ in store.message_refs_for(cid):
@@ -293,7 +316,7 @@ class InitPipeline:
         # A body that is not in the mail cache arrives as empty text and would render as a bare
         # timestamp line, which the model turns into invented events; leave those messages out,
         # and leave the whole conversation pending until the owner has downloaded its mail.
-        msgs = [m for m in fetched if m.text.strip()]
+        msgs = strip_quoted([m for m in fetched if m.text.strip()])
         if not msgs:
             raise _NoCachedText(cid)
         chunks = chunk_messages(msgs, chunk_chars=opts.chunk_chars)
@@ -307,11 +330,22 @@ class InitPipeline:
         start = state["chunk"] + 1 if "chunk" in state else 0
         summary: str = state.get("summary", "")
         events: list[dict] = list(state.get("events", []))
-        memories = 0
+        category: str | None = state.get("category")
+        memories = long = 0
         model = self.cfg.lmstudio.model
+        context = sender_line(store.sender_context(cid))
         for i in range(start, len(chunks)):
             chunk = chunks[i]
-            out = self._complete_json(chunk_prompt, render_messages(chunk), model)
+            out = self._complete_json(chunk_prompt, f"{context}\n\n{render_messages(chunk)}", model)
+            chunk_category = normalize_category(out["category"])
+            category = most_engaged(category, chunk_category)
+            if not allows_events(chunk_category):
+                out["events"] = []
+            if not allows_facts(chunk_category):
+                out["facts"] = []
+            if count_words(out["summary"]) > summary_limit(chunk_category):
+                long += 1
+                log.debug("digest: conversation %s has a chunk summary over its word limit", cid)
             new_summary = out["summary"]
             if i > 0:
                 merged = self._complete_json(
@@ -325,9 +359,11 @@ class InitPipeline:
             with store.transaction():  # a chunk's memories and its checkpoint land together
                 memories += add_memories(store, out, chunk[0].ref.key(), cid, contact_id)
                 store.set_checkpoint(
-                    "digest", str(cid), {"chunk": i, "summary": summary, "events": events}
+                    "digest",
+                    str(cid),
+                    {"chunk": i, "summary": summary, "events": events, "category": category},
                 )
         with store.transaction():
-            store.set_conversation_summary(cid, summary, events=events)
+            store.set_conversation_summary(cid, summary, events=events, category=category)
             store.set_checkpoint("digest", str(cid), {"done": True})
-        return len(chunks) - start, memories
+        return len(chunks) - start, memories, category, long

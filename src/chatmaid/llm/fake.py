@@ -12,7 +12,10 @@ CANNED: dict[str, str] = {
         '{"text":"Friday is fine, thanks.","rationale":"warmer"}],"lookup":""}'
     ),
     "reply_revise": '{"text":"Sure, Friday works. Thanks for the reminder.","rationale":"added thanks"}',
-    "chunk_summary": '{"summary":"S1","events":[],"facts":[{"about":"Ann","text":"likes tea"}]}',
+    "chunk_summary": (
+        '{"category":"conversation","summary":"S1",'
+        '"events":[],"facts":[{"about":"Ann","text":"likes tea"}]}'
+    ),
     "rolling_summary": '{"summary":"S"}',
     "pii_tag": '{"persons":[]}',
 }

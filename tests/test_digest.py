@@ -9,7 +9,7 @@ from chatmaid.llm.fake import FakeLLM
 from chatmaid.llm.prompts import load
 
 PLAIN = {
-    "chunk_summary": '{"summary":"S1","events":[],"facts":[]}',
+    "chunk_summary": '{"category":"conversation","summary":"S1","events":[],"facts":[]}',
     "rolling_summary": '{"summary":"S"}',
 }
 
@@ -21,7 +21,7 @@ def pipeline(env, llm):
 def test_prompts_load():
     p = load("chunk_summary")
     assert p.system.startswith("# chunk_summary\n") and "```" not in p.system
-    assert p.schema["required"] == ["summary", "events", "facts"]
+    assert p.schema["required"] == ["category", "summary", "events", "facts"]
     assert load("rolling_summary").schema["required"] == ["summary"]
 
 
@@ -30,6 +30,7 @@ def test_digest_writes_summary_and_memories(ingested_env):
         {
             "chunk_summary": json.dumps(
                 {
+                    "category": "conversation",
                     "summary": "S1",
                     "events": [{"date": "2024-10-01", "text": "met"}],
                     "facts": [{"about": "Ann", "text": "likes tea"}],
@@ -57,14 +58,17 @@ def test_digest_resumes_after_llm_failure(ingested_env):
     assert first.failed == 1 and second.failed == 0 and second.conversations >= 1
 
 
-def test_digest_skips_bulk_conversations(ingested_env):
-    st = pipeline(ingested_env, FakeLLM(PLAIN)).digest(InitOptions())
-    rows = ingested_env.store.conversations(exclude_bulk=False)
-    bulk = [c for c in rows if c["bulk"]]
+def test_digest_includes_bulk_by_default_and_skip_bulk_option(ingested_env):
+    store = ingested_env.store
+    pipeline(ingested_env, FakeLLM(PLAIN)).digest(InitOptions(skip_bulk=True))  # fresh index
+    bulk = [c for c in store.conversations(exclude_bulk=False) if c["bulk"]]
     assert bulk and all(c["summary"] is None for c in bulk)
-    # every non-bulk conversation is summarized except the fixture's one whose body is not cached
+    st = pipeline(ingested_env, FakeLLM(PLAIN)).digest(InitOptions())
+    rows = store.conversations(exclude_bulk=False)
+    assert all(c["summary"] is not None for c in rows if c["bulk"])
+    # every conversation is summarized except the fixture's one whose body is not cached
     assert st.skipped == 1
-    assert sum(c["summary"] is None for c in rows if not c["bulk"]) == st.skipped
+    assert sum(c["summary"] is None for c in rows) == st.skipped
 
 
 def test_digest_resumes_from_chunk_checkpoint(ingested_env):
@@ -93,6 +97,7 @@ def test_digest_model_and_retry(ingested_env):
 
 def test_digest_drops_malformed_items(ingested_env):
     reply = {
+        "category": "conversation",
         "summary": "S1",
         "events": [{"date": "2024-10-01"}, {"date": "2024-10-02", "text": "ok"}],
         "facts": ["junk", {"about": "Ann", "text": "t"}],
@@ -109,10 +114,10 @@ def test_digest_untracks_conversation_without_fetchable_messages(ingested_env, m
         raise KeyError(ref.key())
 
     monkeypatch.setattr(ingested_env.connector, "fetch", gone)
-    pending = len(store.conversations(needing_summary=True))
+    pending = len(store.conversations(needing_summary=True, exclude_bulk=False))
     first = pipeline(ingested_env, FakeLLM(PLAIN)).digest(InitOptions())
     assert first.failed == pending and first.conversations == 0
-    assert store.conversations(needing_summary=True) == []
+    assert store.conversations(needing_summary=True, exclude_bulk=False) == []
     second = pipeline(ingested_env, FakeLLM(PLAIN)).digest(InitOptions())
     assert second.failed == 0 and second.conversations == 0
 
@@ -129,12 +134,13 @@ def test_digest_skips_conversations_without_cached_text(ingested_env, monkeypatc
         return replace(msg, text="", preview="", body_missing=True)
 
     monkeypatch.setattr(ingested_env.connector, "fetch", fetch)
-    pending = len(store.conversations(needing_summary=True))
+    pending = len(store.conversations(needing_summary=True, exclude_bulk=False))
     llm = FakeLLM(PLAIN)
     first = pipeline(ingested_env, llm).digest(InitOptions())
     assert (first.skipped, first.conversations, first.failed) == (pending, 0, 0)
     assert llm.calls == []  # nothing is sent to the model for bare timestamps
-    assert len(store.conversations(needing_summary=True)) == pending  # still pending, not untracked
+    # still pending, not untracked
+    assert len(store.conversations(needing_summary=True, exclude_bulk=False)) == pending
     assert store.get_checkpoint("digest", str(store.conversations(needing_summary=True)[0]["id"])) is None
     bodies["cached"] = True  # the owner downloads the mail for offline use, then runs the pass again
     second = pipeline(ingested_env, llm).digest(InitOptions())
@@ -172,10 +178,66 @@ def test_chunk_memories_and_checkpoint_are_written_atomically(ingested_env, monk
     monkeypatch.setattr(store, "set_checkpoint", locked)
     llm = FakeLLM(
         {
-            "chunk_summary": '{"summary":"S1","events":[],"facts":[{"about":"Ann","text":"likes tea"}]}',
+            "chunk_summary": '{"category":"conversation","summary":"S1","events":[],"facts":[{"about":"Ann","text":"likes tea"}]}',
             "rolling_summary": '{"summary":"S"}',
         }
     )
     with pytest.raises(sqlite3.OperationalError):
         pipeline(ingested_env, llm).digest(InitOptions(limit_conversations=1))
     assert store.counts()["memories"] == 0
+
+
+def test_digest_stores_category_and_drops_junk_memories(ingested_env):
+    llm = FakeLLM({"chunk_summary": json.dumps({"category": "promotional", "summary": "sale",
+        "events": [{"date": "2024-10-01", "text": "sale ends"}], "facts": [{"about": "Shop", "text": "sells"}]}),
+        "rolling_summary": '{"summary":"S"}'})
+    st = pipeline(ingested_env, llm).digest(InitOptions())
+    assert st.memories == 0 and st.categories.get("promotional", 0) == st.conversations
+    rows = ingested_env.store.conversations(needing_summary=False, exclude_bulk=False)
+    assert all(r["category"] == "promotional" and json.loads(r["events_json"]) == [] for r in rows)
+
+
+def test_digest_invalid_category_is_null(ingested_env):
+    llm = FakeLLM({"chunk_summary": '{"category":"spam","summary":"x","events":[],"facts":[]}', "rolling_summary": '{"summary":"S"}'})
+    st = pipeline(ingested_env, llm).digest(InitOptions())
+    assert st.categories == {"unknown": st.conversations}
+    assert all(r["category"] is None for r in ingested_env.store.conversations(needing_summary=False, exclude_bulk=False))
+
+
+def test_digest_category_most_engaged_across_chunks(ingested_env):
+    store = ingested_env.store
+    multi = next(c for c in store.conversations() if len(store.message_refs_for(c["id"])) > 1)
+    llm = FakeLLM({"chunk_summary": ['{"category":"event","summary":"a","events":[],"facts":[]}',
+                                     '{"category":"conversation","summary":"b","events":[],"facts":[]}'],
+                   "rolling_summary": '{"summary":"S"}'})
+    pipeline(ingested_env, llm).digest(InitOptions(chunk_chars=1, limit_conversations=1))
+    assert store.conversation(multi["id"])["category"] == "conversation"
+
+
+def test_digest_strips_quoted_history_except_first(watch_env):
+    env = watch_env  # its add_row writes a row and body into the fixture cache
+    env.add_row("INBOX", uid="20", message_id="<r20@x>", sender="Ann <ann@x.org>", to="me@x.org",
+                date=1_600_000_100, body="Yes.\n> hello there", in_reply_to="<a@x>")
+    llm = FakeLLM(PLAIN)
+    p = InitPipeline(env.store, env.connector, llm, env.config)
+    p.ingest(InitOptions())
+    p.digest(InitOptions())
+    chunk_calls = [c["user"] for c in llm.calls if c["system"].startswith("# chunk_summary")]
+    thread = next(u for u in chunk_calls if "Yes." in u)
+    assert "hello there" in thread and "> hello there" not in thread
+
+
+def test_digest_sender_context_line(ingested_env):
+    llm = FakeLLM(PLAIN)
+    pipeline(ingested_env, llm).digest(InitOptions())
+    users = [c["user"] for c in llm.calls if c["system"].startswith("# chunk_summary")]
+    assert all(u.startswith("Sender context: ") for u in users)
+    assert any("owner has written to them: yes" in u for u in users)
+    assert any(u.startswith("Sender context: the owner; outgoing mail with no reply indexed.") for u in users)
+
+
+def test_digest_counts_long_summaries(ingested_env):
+    llm = FakeLLM({"chunk_summary": json.dumps({"category": "promotional", "summary": " ".join(["w"] * 26), "events": [], "facts": []}),
+                   "rolling_summary": '{"summary":"S"}'})
+    st = pipeline(ingested_env, llm).digest(InitOptions(limit_conversations=1))
+    assert st.long == 1 and st.conversations == 1

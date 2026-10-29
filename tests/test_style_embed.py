@@ -47,7 +47,7 @@ def test_embed_is_incremental(digested_env):
     assert p.embed(InitOptions()) == 0  # the fixture already embedded everything
     store.add_memory(kind="fact", text="new fact", source_ref="r", observed_at=None)
     assert p.embed(InitOptions()) == 1 and p.embed(InitOptions()) == 0
-    expected = len(store.conversations(needing_summary=False)) + len(store.memories())
+    expected = len(store.conversations(needing_summary=False, exclude_bulk=False)) + len(store.memories())
     assert expected >= 2 and store.counts()["embeddings"] == expected
 
 
@@ -114,7 +114,8 @@ def test_schema_skeleton_chunk_summary():
     from chatmaid.llm.jsoncall import schema_skeleton
 
     assert schema_skeleton(load("chunk_summary").schema) == (
-        '{"summary": "<string>", "events": [{"date": "<string>", "text": "<string>"}], '
+        '{"category": "<string>", "summary": "<string>", '
+        '"events": [{"date": "<string>", "text": "<string>"}], '
         '"facts": [{"about": "<string>", "text": "<string>"}]}'
     )
     assert schema_skeleton(load("style_profile").schema) == '{"profile": "<string>"}'

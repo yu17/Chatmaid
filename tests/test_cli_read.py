@@ -15,7 +15,7 @@ def cli_env(fake_env):
     store = Store(fake_env.config.index_path, embedding_dim=4)
     llm = FakeLLM(
         {
-            "chunk_summary": '{"summary":"S1","events":[],"facts":[]}',
+            "chunk_summary": '{"category":"conversation","summary":"S1","events":[],"facts":[]}',
             "rolling_summary": '{"summary":"S"}',
         },
         dim=4,
