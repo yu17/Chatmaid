@@ -13,12 +13,13 @@ from chatmaid.cloud.pseudonym import Pseudonymizer, deny_list_for, tag_persons
 from chatmaid.cloud.registry import make_backend
 from chatmaid.config import Config
 from chatmaid.connectors.base import Connector
+from chatmaid.init.categories import allows_events, allows_facts, normalize_category
 from chatmaid.init.pipeline import add_memories, render_messages
 from chatmaid.llm import prompts
 from chatmaid.llm.base import LLM, LLMError
 from chatmaid.llm.jsoncall import complete_json
 from chatmaid.model import NormalizedMessage, SourceRef, make_preview
-from chatmaid.quoting import strip_reply_chrome
+from chatmaid.quoting import strip_quoted, strip_reply_chrome
 from chatmaid.reply.context import ReplyContext, build_context
 from chatmaid.reply.drafting import draft_reply, revise_reply
 from chatmaid.store import Store
@@ -153,11 +154,19 @@ class ReplyFlow:
         """Fold one owner message into the rolling summary; False when there is nothing to update."""
         store, cfg = self.store, self.cfg
         conv = store.conversation(conversation_id)
-        if conv is None or conv["summary"] is None or not msg.text.strip():
+        if conv is None or conv["summary"] is None:
             return False  # the digest pass will cover it
+        fresh = strip_quoted([msg], keep_first=False)
+        if not fresh:
+            return False
         out = complete_json(
-            self.llm, prompts.load("chunk_summary"), render_messages([msg]), cfg.lmstudio.model
+            self.llm, prompts.load("chunk_summary"), render_messages(fresh), cfg.lmstudio.model
         )
+        reply_category = normalize_category(out["category"])
+        if not allows_events(reply_category):
+            out["events"] = []
+        if not allows_facts(reply_category):
+            out["facts"] = []
         merged = complete_json(
             self.llm,
             prompts.load("rolling_summary"),
@@ -172,6 +181,7 @@ class ReplyFlow:
             store.set_conversation_summary(
                 conversation_id, merged["summary"], events=events + out["events"]
             )
+            store.set_conversation_category(conversation_id, "conversation")
             add_memories(store, out, msg.ref.key(), conversation_id, contact_id)
         return True
 

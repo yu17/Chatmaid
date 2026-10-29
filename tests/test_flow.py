@@ -140,6 +140,16 @@ def test_failed_draft_leaves_previous_draft_pending(flow_env):
     assert "draft_failed" in kinds(env)
 
 
+def test_owner_message_strips_quoted_history_and_sets_category(flow_env):
+    env = flow_env
+    cid = env.arrive("100")["conversation_id"]
+    env.store.set_conversation_summary(cid, "S0", category="event")
+    owner_reply(env, "200", "Sure.\n\nOn Mon, Ann wrote:\n> Can we meet Friday?", "<m100@x>")
+    user = calls(env, "chunk_summary")[0]["user"]
+    assert "Sure." in user and "Can we meet Friday?" not in user
+    assert env.store.conversation(cid)["category"] == "conversation"
+
+
 def test_owner_message_updates_summary_and_memories(flow_env):
     env = flow_env
     row = env.arrive("100")
