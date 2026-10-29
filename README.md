@@ -95,6 +95,12 @@ Notes:
   folders have opaque uids and are tracked by received time.
 - Ingest checkpoints record the run's `--since`. `init --reset-checkpoints`
   clears them so a complete-history ingest can follow an earlier `--since` run.
+- `init --pass digest` reads message bodies from Evolution's cache at digest
+  time. Messages whose body is not cached are left out of the chunks, and a
+  conversation with no cached text at all is skipped without a model call and
+  stays pending (`skipped` in the pass statistics): download the account's mail
+  for offline use in Evolution and run the pass again. A conversation whose
+  messages have all disappeared from the cache is untracked instead.
 - `watch` baselines every folder on first start (no backlog is routed), then
   routes new mail as `incoming` or `owner` events. Folders that appear later are
   baselined too. A message whose body is not yet cached is deferred for up to

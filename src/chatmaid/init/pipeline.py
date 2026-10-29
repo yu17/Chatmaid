@@ -110,6 +110,11 @@ class DigestStats:
     chunks: int
     memories: int
     failed: int
+    skipped: int  # no cached message text yet: left pending, nothing sent to the model
+
+
+class _NoCachedText(Exception):
+    """Every message of the conversation exists but none has a body in the cache yet."""
 
 
 def render_messages(msgs: list[NormalizedMessage]) -> str:
@@ -254,10 +259,14 @@ class InitPipeline:
         rows = self.store.conversations(
             needing_summary=True, exclude_bulk=opts.skip_bulk, limit=opts.limit_conversations
         )
-        done = chunks = memories = failed = 0
+        done = chunks = memories = failed = skipped = 0
         for row in rows:
             try:
                 n_chunks, n_memories = self._digest_conversation(row["id"], opts)
+            except _NoCachedText:
+                log.info("digest: conversation %s has no cached message text yet; skipped", row["id"])
+                skipped += 1
+                continue
             except LLMError as e:
                 log.warning("digest failed for conversation %s: %s", row["id"], e)
                 failed += 1
@@ -265,23 +274,29 @@ class InitPipeline:
             done += 1
             chunks += n_chunks
             memories += n_memories
-        return DigestStats(done, chunks, memories, failed)
+        return DigestStats(done, chunks, memories, failed, skipped)
 
     def _complete_json(self, prompt: prompts.Prompt, user: str, model: str) -> dict:
         return complete_json(self.llm, prompt, user, model)
 
     def _digest_conversation(self, cid: int, opts: InitOptions) -> tuple[int, int]:
         store = self.store
-        msgs = []
+        fetched = []
         for ref, _ in store.message_refs_for(cid):
             try:
-                msgs.append(self.connector.fetch(ref))
+                fetched.append(self.connector.fetch(ref))
             except KeyError:  # moved or deleted in the mail client since ingest
                 log.warning("digest: message %s is no longer available", ref.key())
-        chunks = chunk_messages(msgs, chunk_chars=opts.chunk_chars)
-        if not chunks:
+        if not fetched:
             store.set_tracked(cid, False)
             raise LLMError(f"conversation {cid} has no fetchable messages; untracked")
+        # A body that is not in the mail cache arrives as empty text and would render as a bare
+        # timestamp line, which the model turns into invented events; leave those messages out,
+        # and leave the whole conversation pending until the owner has downloaded its mail.
+        msgs = [m for m in fetched if m.text.strip()]
+        if not msgs:
+            raise _NoCachedText(cid)
+        chunks = chunk_messages(msgs, chunk_chars=opts.chunk_chars)
         chunk_prompt = prompts.load("chunk_summary")
         rolling_prompt = prompts.load("rolling_summary")
         owner = store.owner_contact_id()

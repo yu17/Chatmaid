@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from dataclasses import replace
 
 import pytest
 
@@ -57,11 +58,13 @@ def test_digest_resumes_after_llm_failure(ingested_env):
 
 
 def test_digest_skips_bulk_conversations(ingested_env):
-    pipeline(ingested_env, FakeLLM(PLAIN)).digest(InitOptions())
+    st = pipeline(ingested_env, FakeLLM(PLAIN)).digest(InitOptions())
     rows = ingested_env.store.conversations(exclude_bulk=False)
     bulk = [c for c in rows if c["bulk"]]
     assert bulk and all(c["summary"] is None for c in bulk)
-    assert all(c["summary"] is not None for c in rows if not c["bulk"])
+    # every non-bulk conversation is summarized except the fixture's one whose body is not cached
+    assert st.skipped == 1
+    assert sum(c["summary"] is None for c in rows if not c["bulk"]) == st.skipped
 
 
 def test_digest_resumes_from_chunk_checkpoint(ingested_env):
@@ -112,6 +115,49 @@ def test_digest_untracks_conversation_without_fetchable_messages(ingested_env, m
     assert store.conversations(needing_summary=True) == []
     second = pipeline(ingested_env, FakeLLM(PLAIN)).digest(InitOptions())
     assert second.failed == 0 and second.conversations == 0
+
+
+def test_digest_skips_conversations_without_cached_text(ingested_env, monkeypatch):
+    store = ingested_env.store
+    real = ingested_env.connector.fetch
+    bodies = {"cached": False}
+
+    def fetch(ref):  # a body that is not in the Evolution cache arrives as empty text
+        msg = real(ref)
+        if bodies["cached"]:
+            return replace(msg, text=msg.text or "now cached", body_missing=False)
+        return replace(msg, text="", preview="", body_missing=True)
+
+    monkeypatch.setattr(ingested_env.connector, "fetch", fetch)
+    pending = len(store.conversations(needing_summary=True))
+    llm = FakeLLM(PLAIN)
+    first = pipeline(ingested_env, llm).digest(InitOptions())
+    assert (first.skipped, first.conversations, first.failed) == (pending, 0, 0)
+    assert llm.calls == []  # nothing is sent to the model for bare timestamps
+    assert len(store.conversations(needing_summary=True)) == pending  # still pending, not untracked
+    assert store.get_checkpoint("digest", str(store.conversations(needing_summary=True)[0]["id"])) is None
+    bodies["cached"] = True  # the owner downloads the mail for offline use, then runs the pass again
+    second = pipeline(ingested_env, llm).digest(InitOptions())
+    assert second.skipped == 0 and second.conversations == pending
+
+
+def test_digest_drops_empty_messages_from_chunks(ingested_env, monkeypatch):
+    store = ingested_env.store
+    multi = next(c for c in store.conversations() if len(store.message_refs_for(c["id"])) > 1)
+    blank_key = store.message_refs_for(multi["id"])[0][0].key()
+    real = ingested_env.connector.fetch
+
+    def fetch(ref):
+        msg = real(ref)
+        return replace(msg, text="", body_missing=True) if ref.key() == blank_key else msg
+
+    monkeypatch.setattr(ingested_env.connector, "fetch", fetch)
+    llm = FakeLLM(PLAIN)
+    st = pipeline(ingested_env, llm).digest(InitOptions())
+    assert st.failed == 0
+    assert store.conversation(multi["id"])["summary"] is not None
+    rendered = [line for c in llm.calls for line in c["user"].splitlines() if line.startswith("[")]
+    assert rendered and not any(line.rstrip().endswith("]") for line in rendered)
 
 
 def test_chunk_memories_and_checkpoint_are_written_atomically(ingested_env, monkeypatch):
