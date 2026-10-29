@@ -3,7 +3,6 @@
 import hashlib
 import json
 import logging
-import re
 import sqlite3
 import time
 from collections.abc import Callable
@@ -19,6 +18,7 @@ from chatmaid.llm import prompts
 from chatmaid.llm.base import LLM, LLMError
 from chatmaid.llm.jsoncall import complete_json
 from chatmaid.model import NormalizedMessage, SourceRef, make_preview
+from chatmaid.quoting import strip_reply_chrome
 from chatmaid.reply.context import ReplyContext, build_context
 from chatmaid.reply.drafting import draft_reply, revise_reply
 from chatmaid.store import Store
@@ -37,26 +37,6 @@ class CloudProposal:
 
 def _norm(text: str) -> str:
     return " ".join(text.split())
-
-
-_ATTRIBUTION_RE = re.compile(
-    r"On .* wrote:|-----Original Message-----|在.*写道[:：]?|\d{4}.*写道[:：]?|>"
-)
-
-
-def strip_reply_chrome(text: str) -> str:
-    """The owner's own words of a sent reply (ruling R16).
-
-    Cuts at the first quoted-history attribution (English or Chinese), the first quoted `>`
-    line, or a `-- ` signature separator, whichever comes first.
-    """
-    kept: list[str] = []
-    for line in text.splitlines(keepends=True):
-        bare = line.rstrip("\r\n")
-        if _ATTRIBUTION_RE.match(bare) or bare in ("-- ", "--"):
-            break
-        kept.append(line)
-    return "".join(kept)
 
 
 class ReplyFlow:
