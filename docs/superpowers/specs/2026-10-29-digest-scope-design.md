@@ -1,7 +1,8 @@
 # Digest scope, categories, style samples and owner-reply examples: design
 
-Date: 2026-10-29. Status: draft for the owner's approval. Builds on the phase 1 design
-(`2026-10-21-phase1-design.md`, sections 5 and 6) and on plans 1a and 1b, which are merged.
+Date: 2026-10-29. Status: implemented; plan docs/superpowers/plans/2026-10-29-digest-scope.md.
+Builds on the phase 1 design (`2026-10-21-phase1-design.md`, sections 5 and 6) and on plans
+1a and 1b, which are merged.
 
 ## 1. Intent
 

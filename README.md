@@ -34,12 +34,15 @@ A UI comes later; research notes are in [`docs/research/`](docs/research/README.
 ```
 src/chatmaid/
   cli.py config.py model.py identity.py threads.py lookup.py
+  quoting.py            shared stripper for quoted history and signatures
+  stop.py               graceful stop on SIGINT/SIGTERM for init
   daemon.py             watch loop
   lock.py               single-instance lock for the watcher and init
   connectors/           base.py; evolution/ (sources, cache, rfc822, connector, events)
-  store/                db.py, schema_v1.sql, schema_v2.sql
+  store/                db.py, schema_v1.sql, schema_v2.sql, schema_v3.sql
   llm/                  base.py, lmstudio.py, fake.py, prompts/
-  init/                 pipeline.py (ingest, digest), passes.py (style, embed), chunking.py
+  init/                 pipeline.py (ingest, digest), passes.py (style, embed), chunking.py,
+                        categories.py, progress.py
   triage/rules.py
   reply/                context.py, drafting.py, flow.py (triage, draft, revise)
   cloud/                base.py, codex.py, claude.py, pseudonym.py, registry.py, fake.py
@@ -71,11 +74,12 @@ Run commands as `uv run chatmaid [--config PATH] <command>` (default config is
 | `accounts` | | list configured Evolution mail accounts |
 | `scan` | `--account UID`, `--dry-run` | count messages per account and folder |
 | `llm-check` | | list LM Studio models and run one completion |
-| `init` | `--since YYYY-MM-DD`, `--limit N`, `--pass {ingest,digest,style,embed,all}`, `--fake-llm`, `--reset-checkpoints` | build the index (resumable) |
-| `status` | | print index counts |
-| `conversations` | `--limit N`, `--all` | list indexed conversations (`--all` includes bulk) |
-| `show ID` | `--limit N` | show one conversation |
-| `lookup QUERY` | `--contact`, `--since`, `--until`, `--limit N`, `--no-vector` | search message history |
+| `init` | `--since YYYY-MM-DD`, `--limit N`, `--pass {ingest,digest,style,embed,all}`, `--skip-bulk`, `--queue-group N`, `--fake-llm`, `--reset-checkpoints` | build the index (resumable; `all` runs ingest, style, digest, embed in that order). `--skip-bulk` leaves bulk conversations out of the digest; `--queue-group N` (1 to 5) processes only queue group N, for smoke runs or to run groups 1 and 2 first; `--fake-llm` answers with canned model output (testing) |
+| `status` | | print index counts, summarized and pending conversations, and `category_<name>=<n>` per category |
+| `conversations` | `--limit N`, `--all`, `--category NAME` | list indexed conversations with their category (`--all` includes bulk) |
+| `show ID` | `--limit N` | show one conversation (title, category, summary, participants, recent messages) |
+| `lookup QUERY` | `--contact`, `--since`, `--until`, `--limit N`, `--no-vector`, `--category NAME` (repeatable), `--threads` | search message history; `--category` keeps hits from conversations of those categories; `--threads` ranks conversations by their summary vectors instead (needs the embedding model and the embed pass; ignores `--contact`, `--since`, `--until`) |
+| `senders` | `--limit N`, `--category NAME` | list senders by message count: conversations, whether you have written to them (`known`) and replied (`replied`), and their summarized conversations per category |
 | `watch` | `--interval SECONDS`, `--no-dbus`, `--no-draft` | route newly arrived mail until interrupted; triage and draft replies unless `--no-draft` |
 | `drafts` | `--status {pending,all}`, `--limit N` | list reply drafts with the text `draft approve` would approve (candidate 1 of the latest round) |
 | `draft show ID` | | show a draft with its versions and cloud calls |
@@ -114,6 +118,32 @@ Notes:
   id>  msg <message id>  <sender>  <subject>`. On Ctrl-C or SIGTERM during a scan
   it finishes the message in hand (including its triage and draft), keeps the
   rest for the next start, and exits.
+- `init --pass digest` covers every tracked conversation, bulk included unless
+  `--skip-bulk`, in five queue groups, newest first within each: (1) two or more
+  messages, one of them yours, (2) other conversations with two or more messages,
+  (3) single messages from senders you have written to and your own outgoing
+  singles, (4) single messages from senders with fewer than five messages,
+  (5) the rest, lowest-volume senders first. Sender statistics are rebuilt from
+  the index at the start and end of each digest run (`senders` shows them).
+- Each chunk sent to the model starts with a sender-context line (messages from
+  the sender and since when, whether you have written to them and replied, the
+  share of their mail with bulk headers). Quoted history is stripped from every
+  message except the first of the conversation.
+- The digest gives each conversation a category: `conversation`, `event`,
+  `transactional`, `newsletter`, `promotional` or `system`; over several chunks
+  the most engaged wins, in that order. Events are kept only for `conversation`
+  and `event` chunks, facts (memories) only for `conversation` chunks. Your own
+  reply routed by `watch` into a summarized conversation is folded into its
+  summary, quoted history stripped, and sets the category to `conversation`.
+  The pass statistics count categories and `long` (chunk summaries over their
+  category's word limit).
+- The digest, style and embed passes print a progress line on stderr (done of
+  total, rate per hour, time left, the conversation in flight): redrawn in place
+  on a terminal, one line per 50 otherwise. Ctrl-C or SIGTERM stops the run at
+  once, including inside a model call; finished conversations and chunks are
+  kept, the command prints the statistics so far and `stopped; run the same
+  command to resume`, and exits with status 130. Running the same command again
+  continues where it stopped; a second Ctrl-C exits immediately.
 
 ## Draft flow
 
@@ -122,13 +152,21 @@ Notes:
   `system`, `unknown`. Only `needs_reply` produces a draft; a message whose body
   is not cached yields no draft. Mail sent more than `draft.max_age_days`
   (default 14) days ago is `informational` by rule, without a model call, in
-  both `watch` and `draft run`.
+  both `watch` and `draft run`. Mail from a sender with at least
+  `triage.learned_bulk_min` (default 10) summarized conversations, all of them
+  `promotional`, `newsletter` or `system`, is `bulk` by rule, also without a
+  model call.
 - When a draft cannot be written (for example LM Studio is down), the message
   stays indexed and a `draft_failed` event records the error and the message id;
   `draft run --message ID` retries it.
 - A draft stores the generated candidate texts in full, the language, and a
   context record (contact card, summary, recent previews, memories, style
-  profile). The owner's own sent text is referenced, never copied.
+  profile, previews of the past replies below). The owner's own sent text is
+  otherwise referenced, never copied.
+- The model also sees "Your similar past replies": up to `draft.examples`
+  (default 3, 0 turns it off) of your own sent messages nearest to the incoming
+  one, from other conversations, as examples of tone and length (they need the
+  embed pass).
 - One pending draft exists per conversation; a newer incoming message marks the
   old one `superseded` once the new draft is written (a failed draft leaves the
   old one pending). When a reply joins two conversations that both have a pending
@@ -221,5 +259,5 @@ with a canned prompt that carries no mail content.
   A message whose draft failed, or that was routed just before `watch` was
   killed hard, is indexed but not drafted until you run `draft run --message
   ID` (the id is in the `watch` line and the `draft_failed` event).
-- `watch` stops between messages, not inside a model call: a stop request waits
-  for the triage and draft of the message in hand.
+- `watch`, unlike `init`, does not stop inside a model call: a stop request
+  waits for the triage and draft of the message in hand.
