@@ -15,4 +15,6 @@ CREATE TABLE sender_stat (
 );
 DROP TABLE IF EXISTS vec_embedding;
 DELETE FROM embedding_item;
+CREATE INDEX idx_message_sender ON message(sender_identity_id);
+CREATE INDEX idx_participant_contact ON conversation_participant(contact_id);
 PRAGMA user_version = 3;

@@ -121,8 +121,9 @@ Notes:
 - `init --pass digest` covers every tracked conversation, bulk included unless
   `--skip-bulk`, in five queue groups, newest first within each: (1) two or more
   messages, one of them yours, (2) other conversations with two or more messages,
-  (3) single messages from senders you have written to and your own outgoing
-  singles, (4) single messages from senders with fewer than five messages,
+  (3) single messages from senders you have written to whose mail mostly lacks
+  bulk headers, and your own outgoing singles, (4) single messages from senders
+  with fewer than five messages,
   (5) the rest, lowest-volume senders first. Sender statistics are rebuilt from
   the index at the start and end of each digest run (`senders` shows them).
 - Each chunk sent to the model starts with a sender-context line (messages from

@@ -297,6 +297,8 @@ def test_v3_upgrade_drops_vectors_and_keeps_summaries(tmp_path):
         assert s.conversation(1)["summary"] == "S" and s.conversation(1)["category"] is None
         s.upsert_embedding("conversation", 1, "h", [1.0, 0, 0, 0])  # the partitioned table works
         assert s.search_embeddings([1.0, 0, 0, 0], k=1, kind="conversation")[0][:2] == ("conversation", 1)
+        indexes = {r["name"] for r in s._conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+        assert {"idx_message_sender", "idx_participant_contact"} <= indexes  # refresh_sender_stats
     finally:
         s.close()
 

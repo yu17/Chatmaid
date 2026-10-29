@@ -343,7 +343,9 @@ class Store:
             "SELECT c.*, s.messages AS sender_messages, "
             "CASE WHEN c.message_count >= 2 AND c.last_owner_at IS NOT NULL THEN 1 "
             "WHEN c.message_count >= 2 THEN 2 "
-            f"WHEN {first} IS NULL OR s.known = 1 THEN 3 "
+            # known senders whose mail is mostly bulk-headed (notification systems the owner
+            # once replied to, or merged into a thread) would park rare humans behind them
+            f"WHEN {first} IS NULL OR (s.known = 1 AND s.bulk_share < 0.5) THEN 3 "
             "WHEN s.messages < 5 THEN 4 ELSE 5 END AS queue_group "
             f"FROM conversation c LEFT JOIN sender_stat s ON s.identity_id = {first} "
             "WHERE c.summary IS NULL AND c.tracked != 0"

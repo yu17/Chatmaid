@@ -169,14 +169,16 @@ non-owner sender in it. A conversation with no non-owner sender (the owner's out
 with no reply in the index, a few hundred to low thousands) gets the fixed line "Sender: the
 owner; outgoing mail with no reply indexed" and sits in group 3 below. For the per-category
 counts in `sender_stat`, a conversation counts once for every non-owner sender in it. (My
-calls.)
+calls.) Known senders whose mail is mostly bulk-headed (notification systems the owner once
+replied to) are excluded from group 3 so rare human senders are not queued behind them
+(controller ruling after the smoke run).
 
 The queue order, newest first within each group:
 
 1. Conversations with two or more messages and an owner message (real exchanges, 863).
 2. Other conversations with two or more messages (about 500).
-3. Single messages from senders the owner has written to, and the owner's own outgoing
-   singles.
+3. Single messages from senders the owner has written to whose mail mostly lacks bulk
+   headers, and the owner's own outgoing singles.
 4. Single messages from senders with fewer than five messages in total.
 5. Everything else, lowest-volume senders first, so the highest-volume unanswered senders
    (Costco, Codeforces digests, Canvas) come last.

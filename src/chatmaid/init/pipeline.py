@@ -142,6 +142,14 @@ class _NoCachedText(Exception):
     """Every message of the conversation exists but none has a body in the cache yet."""
 
 
+class _SourceUnavailable(Exception):
+    """The mail source could not be read (Evolution's folders.db locked, a file unreadable)."""
+
+    def __init__(self, cid: int, cause: Exception) -> None:
+        super().__init__(f"conversation {cid}: {cause}")
+        self.cid = cid
+
+
 def render_messages(msgs: list[NormalizedMessage]) -> str:
     lines = []
     for m in msgs:
@@ -324,6 +332,12 @@ class InitPipeline:
                     log.warning("digest failed for conversation %s: %s", row["id"], e)
                     failed += 1
                     continue
+                except _SourceUnavailable as e:  # left pending: the next run retries it
+                    log.warning(
+                        "digest: source unavailable for conversation %s: %s", e.cid, e.__cause__
+                    )
+                    failed += 1
+                    continue
                 n_chunks, n_memories, category, n_long = result
                 done += 1
                 chunks += n_chunks
@@ -355,6 +369,8 @@ class InitPipeline:
                 fetched.append(self.connector.fetch(ref))
             except KeyError:  # moved or deleted in the mail client since ingest
                 log.warning("digest: message %s is no longer available", ref.key())
+            except (OSError, sqlite3.Error) as e:  # Evolution busy with its own database
+                raise _SourceUnavailable(cid, e) from e
         if not fetched:
             store.set_tracked(cid, False)
             raise LLMError(f"conversation {cid} has no fetchable messages; untracked")

@@ -88,6 +88,40 @@ def test_digest_resumes_from_chunk_checkpoint(ingested_env):
     assert store.get_checkpoint("digest", str(cid)) == {"done": True}
 
 
+def test_digest_resumes_with_category_from_checkpoint(ingested_env):
+    store = ingested_env.store
+    multi = next(c for c in store.conversations() if len(store.message_refs_for(c["id"])) > 1)
+    cid = multi["id"]
+    store.set_checkpoint(
+        "digest", str(cid), {"chunk": 0, "summary": "partial", "events": [], "category": "conversation"}
+    )
+    llm = FakeLLM({"chunk_summary": '{"category":"promotional","summary":"b","events":[],"facts":[]}',
+                   "rolling_summary": '{"summary":"S"}'})
+    pipeline(ingested_env, llm).digest(InitOptions(chunk_chars=1, limit_conversations=1))
+    # the most engaged category across chunks survives the resume
+    assert store.conversation(cid)["category"] == "conversation"
+
+
+def test_digest_counts_locked_source_as_failed_and_retries(ingested_env, monkeypatch):
+    store = ingested_env.store
+    store.refresh_sender_stats()
+    cid = store.digest_queue(exclude_bulk=False, limit=1)[0]["id"]
+    real = ingested_env.connector.fetch
+
+    def locked(ref):  # Evolution holds its folders.db while the owner reads mail
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(ingested_env.connector, "fetch", locked)
+    st = pipeline(ingested_env, FakeLLM(PLAIN)).digest(InitOptions(limit_conversations=1))
+    assert st.failed == 1 and st.conversations == 0
+    row = store.conversation(cid)
+    assert row["summary"] is None and row["tracked"] == 1  # left pending, not untracked
+    assert store.get_checkpoint("digest", str(cid)) is None
+    monkeypatch.setattr(ingested_env.connector, "fetch", real)
+    again = pipeline(ingested_env, FakeLLM(PLAIN)).digest(InitOptions(limit_conversations=1))
+    assert again.conversations == 1 and store.conversation(cid)["summary"] is not None
+
+
 def test_digest_model_and_retry(ingested_env):
     llm = FakeLLM({"chunk_summary": "not json", "rolling_summary": '{"summary":"S"}'})
     st = pipeline(ingested_env, llm).digest(InitOptions(limit_conversations=1))

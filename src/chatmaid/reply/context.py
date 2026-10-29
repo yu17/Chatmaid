@@ -55,7 +55,7 @@ class ReplyContext:
             recent=[(int(t), who, text) for t, who, text in d["recent"]],
             memories=list(d["memories"]),
             style=d["style"],
-            examples=[(k, int(t), to, text) for k, t, to, text in d["examples"]],
+            examples=[(k, int(t), to, text) for k, t, to, text in d.get("examples", [])],
             language=d["language"],
             tier=d["tier"],
             message=d["message"],

@@ -56,6 +56,29 @@ def test_digest_queue_groups_and_order(senders_env):
     assert st.digest_queue(exclude_bulk=True) and all(not r["bulk"] for r in st.digest_queue(exclude_bulk=True))
 
 
+def test_known_sender_with_bulk_headers_leaves_group_3(senders_env, sample_message):
+    st = senders_env.store
+    canvas = st.upsert_identity("email", "canvas@x.org", "Canvas", is_owner=False)
+    # a thread merge once put the notification system in one of Ann's conversations: known = 1
+    st.add_participant(senders_env.ann_cids[0], st.contact_id_of(canvas))
+    canvas_cids = []
+    for i in range(5):
+        cid = st.upsert_conversation("email", f"canvas{i}", f"canvas{i}", "thread")
+        msg = replace(sample_message, ref=replace(sample_message.ref, uid=str(300 + i)),
+                      message_id=None, sender=Address("Canvas", "canvas@x.org"),
+                      sent_at=1_700_000_100 + i, is_owner=False, bulk=True)
+        st.add_participant(cid, st.contact_id_of(canvas))
+        st.upsert_message(cid, msg, canvas)
+        canvas_cids.append(cid)
+    st.refresh_sender_stats()
+    stat = st.sender_stat(canvas)
+    assert (stat["known"], stat["bulk_share"]) == (1, 1.0)
+    groups = {r["id"]: r["queue_group"] for r in st.digest_queue(exclude_bulk=False)}
+    assert {groups[c] for c in canvas_cids} == {5}
+    assert {groups[c] for c in senders_env.ann_cids} == {1}
+    assert groups[senders_env.owner_only_cid] == 3
+
+
 def test_sender_context_for_owner_only_conversation(senders_env):
     st = senders_env.store
     st.refresh_sender_stats()

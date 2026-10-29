@@ -126,6 +126,8 @@ def test_context_json_stores_example_previews_only(env):
     d = build(e, msg, row).to_json()
     assert d["examples"] and all(len(x[3]) <= 200 for x in d["examples"])
     assert ReplyContext.from_json(d).examples == [tuple(x) for x in d["examples"]]
+    del d["examples"]  # a draft context stored before examples existed still loads
+    assert ReplyContext.from_json(d).examples == []
 
 
 def test_zero_examples_disables_the_section(env):
