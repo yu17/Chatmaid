@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 from chatmaid.init.chunking import detect_language
 from chatmaid.llm import prompts
 from chatmaid.llm.base import LLMError
+from chatmaid.model import SourceRef
+from chatmaid.quoting import strip_reply_chrome
 from chatmaid.stop import StopRequested
 
 if TYPE_CHECKING:
@@ -32,7 +34,7 @@ def run_style(
         if all(len(g) >= STYLE_MAX_PER_LANGUAGE for g in groups.values()) and len(groups) >= 2:
             break
         try:
-            text = pipeline.connector.fetch(ref).text.strip()
+            text = strip_reply_chrome(pipeline.connector.fetch(ref).text).strip()
         except KeyError:  # moved or deleted in the mail client since ingest
             continue
         if len(text) < STYLE_MIN_CHARS:
@@ -73,7 +75,7 @@ def run_style(
 
 
 def run_embed(pipeline: "InitPipeline", opts: "InitOptions") -> int:
-    """Embed conversation summaries and memories whose text is new or changed."""
+    """Embed conversation summaries, memories and owner messages whose text is new or changed."""
     store = pipeline.store
     items = [
         ("conversation", r["id"], r["summary"])
@@ -81,6 +83,14 @@ def run_embed(pipeline: "InitPipeline", opts: "InitOptions") -> int:
         if r["summary"]
     ]
     items += [("memory", r["id"], r["text"]) for r in store.memories()]
+    for row in store.owner_messages():
+        try:
+            fetched = pipeline.connector.fetch(SourceRef.from_key(row["ref_key"]))
+        except KeyError:  # moved or deleted in the mail client since ingest
+            continue
+        text = strip_reply_chrome(fetched.text).strip()[:2000]
+        if text:
+            items.append(("owner_message", row["id"], text))
 
     pending = []
     for kind, ref_id, text in items:

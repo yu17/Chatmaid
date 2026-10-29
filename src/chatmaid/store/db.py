@@ -611,6 +611,12 @@ class Store:
         ).fetchall()
         return [SourceRef.from_key(r["ref_key"]) for r in rows]
 
+    def owner_messages(self) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT id, ref_key, conversation_id FROM message "
+            "WHERE is_owner = 1 AND bulk = 0 AND body_missing = 0 ORDER BY id"
+        ).fetchall()
+
     def message_ids_for_account(
         self, platform: str, account: str
     ) -> list[tuple[str | None, tuple[str, ...]]]:

@@ -6,6 +6,8 @@ from chatmaid.init.pipeline import InitOptions, InitPipeline
 from chatmaid.llm.base import LLMError
 from chatmaid.llm.fake import FakeLLM
 from chatmaid.llm.prompts import load
+from chatmaid.model import SourceRef
+from chatmaid.quoting import strip_reply_chrome
 from chatmaid.stop import StopRequested
 
 
@@ -48,8 +50,32 @@ def test_embed_is_incremental(digested_env):
     assert p.embed(InitOptions()) == 0  # the fixture already embedded everything
     store.add_memory(kind="fact", text="new fact", source_ref="r", observed_at=None)
     assert p.embed(InitOptions()) == 1 and p.embed(InitOptions()) == 0
-    expected = len(store.conversations(needing_summary=False, exclude_bulk=False)) + len(store.memories())
+    expected = (
+        len(store.conversations(needing_summary=False, exclude_bulk=False))
+        + len(store.memories())
+        + len(store.owner_messages())
+    )
     assert expected >= 2 and store.counts()["embeddings"] == expected
+
+
+def test_style_samples_are_stripped(watch_env):
+    env = watch_env
+    env.add_row("[Gmail]/Sent Mail", uid="50", message_id="<s50@x>", sender="me@x.org", to="ann@x.org",
+                date=1_700_000_900, body="Thanks a lot for the quick help today.\n\nOn Mon, Ann wrote:\n> QUOTEDTEXT")
+    llm = FakeLLM({"style_profile": '{"profile": "P"}'})
+    pipe = InitPipeline(env.store, env.connector, llm, env.config)
+    pipe.ingest(InitOptions())
+    pipe.style(InitOptions(), min_samples=1)
+    user = next(c["user"] for c in llm.calls if c["system"].startswith("# style_profile"))
+    assert "quick help today" in user and "QUOTEDTEXT" not in user
+
+
+def test_embed_includes_owner_messages_by_kind(digested_env):
+    store = digested_env.store
+    assert store.search_embeddings([0.5] * 4, k=5, kind="owner_message")
+    row = store.owner_messages()[0]
+    text = strip_reply_chrome(digested_env.connector.fetch(SourceRef.from_key(row["ref_key"])).text).strip()[:2000]
+    assert store.embedding_hash("owner_message", row["id"]) == hashlib.sha256(text.encode()).hexdigest()
 
 
 def test_embed_reembeds_changed_text(digested_env):
@@ -83,8 +109,9 @@ def test_embed_batches_of_32(ingested_env):
 
     llm.embed = spy
     pipe = InitPipeline(store, ingested_env.connector, llm, ingested_env.config)
-    assert pipe.embed(InitOptions()) == 40
-    assert sizes == [32, 8]
+    total = 40 + len(store.owner_messages())  # the ingested owner messages are embedded too
+    assert pipe.embed(InitOptions()) == total
+    assert sizes == [32, total - 32]
 
 
 def test_run_executes_style_and_embed(digested_env):
