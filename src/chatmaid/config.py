@@ -54,6 +54,11 @@ class DraftConfig:
 
 
 @dataclass(frozen=True)
+class TriageConfig:
+    learned_bulk_min: int
+
+
+@dataclass(frozen=True)
 class CloudConfig:
     default_backend: str
     codex_model: str
@@ -69,6 +74,7 @@ class Config:
     email: EmailConfig
     lmstudio: LMStudioConfig
     draft: DraftConfig
+    triage: TriageConfig
     cloud: CloudConfig
 
     @property
@@ -111,6 +117,7 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
         "max_age_days": 14,
         "examples": 3,
     },
+    "triage": {"learned_bulk_min": 10},
     "cloud": {
         "default_backend": "codex",
         "codex_model": "gpt-6-astra",
@@ -145,7 +152,7 @@ def load(path: Path, *, project_root: Path | None = None) -> Config:
         return {**_DEFAULTS[name], **raw.get(name, {})}
 
     d, o, e, lm = section("data"), section("owner"), section("email"), section("lmstudio")
-    dr, cl = section("draft"), section("cloud")
+    dr, cl, tr = section("draft"), section("cloud"), section("triage")
     for stale in ("model_small", "model_main", "model_heavy"):
         if stale in raw.get("lmstudio", {}):
             raise ConfigError(
@@ -166,6 +173,9 @@ def load(path: Path, *, project_root: Path | None = None) -> Config:
         )
     if not isinstance(dr["examples"], int) or isinstance(dr["examples"], bool) or dr["examples"] < 0:
         raise ConfigError(f"draft.examples must be an integer >= 0, got {dr['examples']!r}")
+    lbm = tr["learned_bulk_min"]
+    if not isinstance(lbm, int) or isinstance(lbm, bool) or lbm < 1:
+        raise ConfigError(f"triage.learned_bulk_min must be an integer >= 1, got {lbm!r}")
     sent = e["local_maildir_sent"]
     return Config(
         data=DataConfig(dir=_resolve(d["dir"], project_root), hot_window_days=d["hot_window_days"]),
@@ -198,6 +208,7 @@ def load(path: Path, *, project_root: Path | None = None) -> Config:
             max_age_days=dr["max_age_days"],
             examples=dr["examples"],
         ),
+        triage=TriageConfig(learned_bulk_min=lbm),
         cloud=CloudConfig(
             default_backend=cl["default_backend"],
             codex_model=cl["codex_model"],

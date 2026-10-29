@@ -87,10 +87,13 @@ class ReplyFlow:
             raise ValueError(f"message {ref} is not stored")
         if msg.is_owner:
             return None
+        learned = store.learned_bulk(
+            row["sender_identity_id"], min_conversations=cfg.triage.learned_bulk_min
+        )
         t = triage_message(
             self.llm, cfg.lmstudio.model, msg, store.conversation(conversation_id),
             message_chars=cfg.draft.message_chars, now=self.now(),
-            max_age_days=cfg.draft.max_age_days,
+            max_age_days=cfg.draft.max_age_days, learned_bulk=learned,
         )
         store.add_triage(row["id"], t.category, t.reason, decided_by=t.decided_by, model=t.model)
         if t.tier:

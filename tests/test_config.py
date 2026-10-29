@@ -116,3 +116,11 @@ def test_draft_examples_default_and_validation(tmp_path):
     p.write_text('[draft]\nexamples = -1\n')
     with pytest.raises(ConfigError, match="draft.examples"):
         load(p, project_root=tmp_path)
+
+
+def test_triage_section_defaults_and_validation(tmp_path):
+    assert load(Path("config.example.toml"), project_root=tmp_path).triage.learned_bulk_min == 10
+    p = tmp_path / "config.toml"
+    p.write_text('[triage]\nlearned_bulk_min = 0\n')
+    with pytest.raises(ConfigError, match="triage.learned_bulk_min"):
+        load(p, project_root=tmp_path)

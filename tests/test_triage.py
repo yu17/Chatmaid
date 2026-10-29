@@ -89,3 +89,8 @@ def test_triage_message_skips_the_model_for_old_mail(sample_message):
         now=sample_message.sent_at + 30 * DAY, max_age_days=14,
     )
     assert (t.category, t.decided_by) == ("informational", "rule") and llm.calls == []
+
+
+def test_rule_learned_bulk_sender(sample_message):
+    t = rule_triage(sample_message, None, now=RECENT["now"], max_age_days=14, learned_bulk=True)
+    assert t == Triage("bulk", "bulk", "learned bulk sender", "rule")

@@ -350,3 +350,12 @@ def test_reply_linking_two_drafted_conversations_merges_without_error(flow_env):
     assert first <= {d["id"] for d in drafts}
     assert {d["conversation_id"] for d in drafts} == {row["conversation_id"]}
     assert [d["status"] for d in drafts].count("pending") == 1
+
+
+def test_learned_bulk_sender_is_triaged_by_rule(flow_env, monkeypatch):
+    env = flow_env
+    monkeypatch.setattr(env.store, "learned_bulk", lambda identity_id, *, min_conversations: True)
+    row = env.arrive("100")
+    t = env.store.triage_for(row["id"])
+    assert (t["category"], t["decided_by"], t["reason"]) == ("bulk", "rule", "learned bulk sender")
+    assert calls(env, "triage") == [] and env.store.pending_draft_for(row["conversation_id"]) is None

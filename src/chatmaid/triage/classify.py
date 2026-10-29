@@ -22,7 +22,12 @@ class Triage:
 
 
 def rule_triage(
-    msg: NormalizedMessage, conversation: sqlite3.Row | None, *, now: int, max_age_days: int
+    msg: NormalizedMessage,
+    conversation: sqlite3.Row | None,
+    *,
+    now: int,
+    max_age_days: int,
+    learned_bulk: bool = False,
 ) -> Triage | None:
     """Decide the obvious cases from age, headers and labels; None means ask the model.
 
@@ -35,6 +40,8 @@ def rule_triage(
         return Triage("informational", None, f"older than {max_age_days} days", "rule")
     if msg.bulk:
         return Triage("bulk", "bulk", "bulk mail headers", "rule")
+    if learned_bulk:
+        return Triage("bulk", "bulk", "learned bulk sender", "rule")
     if "spam" in msg.labels:
         return Triage("bulk", "bulk", "spam folder", "rule")
     if conversation and conversation["bulk"]:
@@ -70,9 +77,12 @@ def triage_message(
     message_chars: int,
     now: int,
     max_age_days: int,
+    learned_bulk: bool = False,
 ) -> Triage:
     """The rule verdict if there is one, otherwise the model's."""
-    verdict = rule_triage(msg, conversation, now=now, max_age_days=max_age_days)
+    verdict = rule_triage(
+        msg, conversation, now=now, max_age_days=max_age_days, learned_bulk=learned_bulk
+    )
     if verdict is not None:
         return verdict
     try:

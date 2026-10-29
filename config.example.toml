@@ -39,6 +39,10 @@ message_chars = 6000       # characters of the incoming message shown to the mod
 max_age_days = 14          # older incoming mail is triaged informational by rule, never drafted
 examples = 3                # the owner's similar past replies shown to the model as tone examples (0 = off)
 
+[triage]
+# senders whose summarized conversations were all promotional/newsletter/system this many times are triaged bulk by rule
+learned_bulk_min = 10
+
 [cloud]
 default_backend = "codex"  # "codex" or "claude"; every call still needs explicit consent
 codex_model = "gpt-6-astra"
