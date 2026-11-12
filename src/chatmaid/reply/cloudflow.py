@@ -89,21 +89,30 @@ class CloudMixin:
             raise ValueError(f"cloud call {call_id} is {call['status']}, not proposed")
         return call
 
+    def _leave_proposed(self, call_id: int, to_status: str, **fields) -> None:
+        """proposed -> to_status, conditionally: a concurrent send or decline wins only once."""
+        if not self.store.transition_cloud_call(call_id, "proposed", to_status, **fields):
+            current = self.store.cloud_call(call_id)
+            status = current["status"] if current is not None else "gone"
+            raise ValueError(f"cloud call {call_id} is {status}, not proposed")
+
     def send_cloud(self, call_id: int) -> int:
         """Send the stored payload, byte for byte, and store the re-hydrated result as a version."""
         call = self._proposed_call(call_id)
         store = self.store
         draft = store.draft(call["draft_id"])
         if draft is None or draft["status"] != "pending":
-            store.set_cloud_call_status(call_id, "declined", error="draft no longer pending")
-            store.log_event(
-                "cloud", "declined", str(call_id), {"reason": "draft no longer pending"}
-            )
+            with store.transaction():
+                self._leave_proposed(call_id, "declined", error="draft no longer pending")
+                store.log_event(
+                    "cloud", "declined", str(call_id), {"reason": "draft no longer pending"}
+                )
             raise ValueError("draft no longer pending")
         b = self.backend_factory(call["backend"])
         # consent is on record before anything leaves the machine (ruling R15); a `sending`
-        # row is never `proposed` again, so even a hard kill cannot lead to a second send
-        store.set_cloud_call_status(call_id, "sending", consented_at=self.now())
+        # row is never `proposed` again, so even a hard kill cannot lead to a second send,
+        # and a decline that landed since the check above makes this transition fail
+        self._leave_proposed(call_id, "sending", consented_at=self.now())
         try:
             out = b.complete(call["payload"], CLOUD_SCHEMA)
             if not (
@@ -153,5 +162,5 @@ class CloudMixin:
     def decline_cloud(self, call_id: int) -> None:
         self._proposed_call(call_id)
         with self.store.transaction():
-            self.store.set_cloud_call_status(call_id, "declined")
+            self._leave_proposed(call_id, "declined")  # a call already `sending` stays so
             self.store.log_event("cloud", "declined", str(call_id), {})

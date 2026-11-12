@@ -929,6 +929,25 @@ class Store:
             (status, consented_at, response, response_hash, error, finished, call_id),
         )
 
+    def transition_cloud_call(
+        self,
+        call_id: int,
+        from_status: str,
+        to_status: str,
+        *,
+        consented_at: int | None = None,
+        error: str | None = None,
+    ) -> bool:
+        """Move the call to `to_status` only if it is still `from_status`; False when it lost."""
+        finished = _now() if to_status in ("sent", "failed", "declined") else None
+        cur = self._conn.execute(
+            "UPDATE cloud_call SET status = ?, consented_at = COALESCE(?, consented_at), "
+            "error = COALESCE(?, error), finished_at = COALESCE(?, finished_at) "
+            "WHERE id = ? AND status = ?",
+            (to_status, consented_at, error, finished, call_id, from_status),
+        )
+        return cur.rowcount == 1
+
     # --- embeddings ---
 
     def upsert_embedding(self, kind: str, ref_id: int, text_hash: str, vector: list[float]) -> None:

@@ -276,3 +276,50 @@ def test_tagger_sees_the_summary(flow_env):
     assert "Zed" not in p.payload
     tag_calls = [c for c in env.llm.calls if "Zed asked about Friday" in c["user"]]
     assert tag_calls
+
+
+def test_decline_racing_a_send_never_leads_to_a_send(flow_env, monkeypatch):
+    env = flow_env
+    did = setup(env)
+    backend = FakeCloud()
+    with_backend(env, backend)
+    p = env.flow.propose_cloud(did)
+    real_draft = env.store.draft
+
+    def decline_meanwhile(draft_id):  # the send has passed its status check; a decline lands
+        env.store.transition_cloud_call(p.call_id, "proposed", "declined")
+        return real_draft(draft_id)
+
+    monkeypatch.setattr(env.store, "draft", decline_meanwhile)
+    with pytest.raises(ValueError, match=f"cloud call {p.call_id} is declined, not proposed"):
+        env.flow.send_cloud(p.call_id)
+    assert backend.prompts == []
+    call = env.store.cloud_call(p.call_id)
+    assert call["status"] == "declined" and call["consented_at"] is None
+    assert len(env.store.draft_versions(did)) == 2
+
+
+def test_a_sending_call_cannot_become_declined(flow_env, monkeypatch):
+    env = flow_env
+    did = setup(env)
+    p = env.flow.propose_cloud(did)
+    stale = env.store.cloud_call(p.call_id)  # read while still proposed
+    assert env.store.transition_cloud_call(p.call_id, "proposed", "sending", consented_at=5)
+    monkeypatch.setattr(env.flow, "_proposed_call", lambda call_id: stale)
+    with pytest.raises(ValueError, match=f"cloud call {p.call_id} is sending, not proposed"):
+        env.flow.decline_cloud(p.call_id)
+    assert env.store.cloud_call(p.call_id)["status"] == "sending"
+    assert not any(e["kind"] == "declined" for e in env.store.events(limit=20))
+    assert not env.store.transition_cloud_call(p.call_id, "proposed", "declined")
+
+
+def test_transition_cloud_call_sets_fields_only_when_it_wins(flow_env):
+    env = flow_env
+    did = setup(env)
+    p = env.flow.propose_cloud(did)
+    assert env.store.transition_cloud_call(p.call_id, "proposed", "declined", error="why")
+    call = env.store.cloud_call(p.call_id)
+    assert call["status"] == "declined" and call["error"] == "why"
+    assert call["finished_at"] is not None
+    assert not env.store.transition_cloud_call(p.call_id, "proposed", "sending", consented_at=7)
+    assert env.store.cloud_call(p.call_id)["consented_at"] is None
