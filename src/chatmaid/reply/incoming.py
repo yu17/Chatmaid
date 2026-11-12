@@ -1,6 +1,8 @@
 """Routine B: triage an incoming message and draft a reply."""
 
 import logging
+import sqlite3
+from collections.abc import Callable
 
 from chatmaid.model import NormalizedMessage, SourceRef
 from chatmaid.reply.context import build_context
@@ -9,15 +11,30 @@ from chatmaid.triage.classify import triage_message
 
 
 log = logging.getLogger(__name__)
+RETRY_LIMIT = 5  # messages per watch trigger, so a stop or the next trigger is not held up
+RETRY_BACKOFF_S = 600  # wait per failed attempt: attempt 2 after 10 minutes, attempt 3 after 20
 
 
 class IncomingMixin:
-    def retry_untriaged(self, *, limit: int = 20) -> int:
-        """Give watched messages the model failed on another go; returns how many got triaged."""
+    def retry_untriaged(
+        self, *, limit: int = RETRY_LIMIT, should_stop: Callable[[], bool] | None = None
+    ) -> int:
+        """Give watched messages the model failed on another go; returns how many got triaged.
+
+        A message waits RETRY_BACKOFF_S per failed attempt since its last failure, so a model
+        outage does not spend all three attempts at once; `should_stop` is checked between
+        messages so a stopping watcher is not held up.
+        """
         store = self.store
-        since = self.now() - self.cfg.draft.max_age_days * 86400
+        now = self.now()
+        since = now - self.cfg.draft.max_age_days * 86400
         done = 0
-        for row in store.untriaged_incoming(since=since, limit=limit):
+        rows = store.untriaged_incoming(
+            since=since, limit=limit, now=now, backoff_s=RETRY_BACKOFF_S
+        )
+        for row in rows:
+            if should_stop is not None and should_stop():
+                break
             ref = row["ref_key"]
             try:
                 msg = self.connector.fetch(SourceRef.from_key(ref))
@@ -25,6 +42,13 @@ class IncomingMixin:
                 store.log_event(
                     "reply", "draft_failed", ref,
                     {"error": "gone from the mail store", "message_id": row["id"]},
+                )
+                continue
+            except (OSError, sqlite3.Error) as e:  # an attempt like any other; go on to the next
+                log.warning("retry of message %s: cannot read it (%s)", row["id"], e)
+                store.log_event(
+                    "reply", "draft_failed", ref,
+                    {"error": f"cannot read the message: {e}", "message_id": row["id"]},
                 )
                 continue
             try:

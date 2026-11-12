@@ -1114,11 +1114,27 @@ class Store:
         ).lastrowid
 
     def untriaged_incoming(
-        self, *, since: int, max_attempts: int = 3, limit: int = 50
+        self,
+        *,
+        since: int,
+        max_attempts: int = 3,
+        limit: int = 50,
+        now: int | None = None,
+        backoff_s: int = 0,
     ) -> list[sqlite3.Row]:
-        """Watched incoming messages with no triage yet, newest first, for another attempt."""
+        """Watched incoming messages with no triage yet, newest first, for another attempt.
+
+        With `backoff_s`, a message whose newest failure is younger than backoff_s times its
+        failed attempts so far is left out until then.
+        """
+        backoff, params = "", []
+        if backoff_s:
+            backoff = """
+              AND (SELECT COALESCE(MAX(b.ts), 0) + ? * COUNT(*) FROM event_log b
+                   WHERE b.source = 'reply' AND b.kind = 'draft_failed' AND b.ref = m.ref_key) <= ?"""
+            params = [backoff_s, int(time.time()) if now is None else now]
         return self._conn.execute(
-            """
+            f"""
             SELECT m.* FROM message m
             WHERE m.is_owner = 0 AND m.sent_at >= ?
               AND EXISTS (SELECT 1 FROM event_log e WHERE e.source = 'evolution'
@@ -1127,10 +1143,10 @@ class Store:
               AND NOT EXISTS (SELECT 1 FROM message o WHERE o.conversation_id = m.conversation_id
                               AND o.is_owner = 1 AND o.sent_at > m.sent_at)
               AND (SELECT COUNT(*) FROM event_log f WHERE f.source = 'reply'
-                   AND f.kind = 'draft_failed' AND f.ref = m.ref_key) < ?
+                   AND f.kind = 'draft_failed' AND f.ref = m.ref_key) < ?{backoff}
             ORDER BY m.sent_at DESC, m.id DESC LIMIT ?
             """,
-            (since, max_attempts, limit),
+            (since, max_attempts, *params, limit),
         ).fetchall()
 
     def events(

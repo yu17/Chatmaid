@@ -27,7 +27,7 @@
 {% endif %}
 
 <h2>Waiting for triage</h2>
-<p class="meta">A message is retried at most three times, then drops off this list; its failures stay under Recent failures.</p>
+<p class="meta">While watch runs it retries each message at most three times, waiting 10 minutes after the first failure and 20 after the second; Retry here tries again at once. After three failures a message drops off this list; its failures stay under Recent failures.</p>
 {% if untriaged %}
 <ul class="rows">
   {% for m in untriaged %}

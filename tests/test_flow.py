@@ -1,4 +1,5 @@
 import json
+import sqlite3
 
 import pytest
 
@@ -432,32 +433,106 @@ def test_untriaged_incoming_skips_init_messages_answered_threads_and_spent_attem
     assert env.store.untriaged_incoming(since=0) == []
 
 
-def test_retry_untriaged_triages_after_the_model_recovers(flow_env):
+@pytest.fixture
+def clock(flow_env, monkeypatch):
+    """One injected clock for the flow and the event log, starting at the fixtures' time."""
+    t = [1_700_001_000]
+    monkeypatch.setattr("chatmaid.store.db._now", lambda: t[0])
+    flow_env.flow.now = lambda: t[0]
+
+    def advance(seconds):
+        t[0] += seconds
+
+    return advance
+
+
+def test_retry_untriaged_triages_after_the_model_recovers(flow_env, clock):
     env = flow_env
     _fail_triage(env)
     row = env.arrive("100")
     assert env.store.triage_for(row["id"]) is None
     assert kinds(env).count("draft_failed") == 1
+    clock(600)
     assert env.flow.retry_untriaged() == 1
     assert env.store.triage_for(row["id"])["category"] == "needs_reply"
     assert len(env.store.drafts(status=None)) == 1
     assert env.flow.retry_untriaged() == 0
 
 
-def test_retry_gives_up_after_three_failures(flow_env):
+def test_retry_gives_up_after_three_failures(flow_env, clock):
     env = flow_env
     _fail_triage(env)
     row = env.arrive("100")
     env.llm.fail_next(10)
+    clock(600)
     assert env.flow.retry_untriaged() == 0
+    clock(1200)
     assert env.flow.retry_untriaged() == 0
     assert kinds(env).count("draft_failed") == 3
     env.llm.fail_next(0)
+    clock(86400)
     assert env.flow.retry_untriaged() == 0
     assert env.store.triage_for(row["id"]) is None
 
 
-def test_retry_logs_a_message_gone_from_the_mail_store(flow_env, monkeypatch):
+def test_retry_backs_off_600_seconds_per_attempt(flow_env, clock):
+    env = flow_env
+    _fail_triage(env)
+    row = env.arrive("100")  # attempt 1 failed at t0
+    env.llm.fail_next(10)
+    clock(599)
+    env.flow.retry_untriaged()
+    assert kinds(env).count("draft_failed") == 1  # attempt 2 waits 10 minutes
+    clock(1)
+    env.flow.retry_untriaged()
+    assert kinds(env).count("draft_failed") == 2  # attempt 2 failed just now
+    env.flow.retry_untriaged()  # the same trigger's hook never retries what just failed
+    clock(1199)
+    env.flow.retry_untriaged()
+    assert kinds(env).count("draft_failed") == 2  # attempt 3 waits 20 minutes
+    env.llm.fail_next(0)
+    clock(1)
+    assert env.flow.retry_untriaged() == 1
+    assert env.store.triage_for(row["id"]) is not None
+
+
+def test_backoff_applies_to_the_retry_queue_not_the_status_list(flow_env, clock):
+    env = flow_env
+    _fail_triage(env)
+    row = env.arrive("100")
+    assert env.store.untriaged_incoming(since=0, now=1_700_001_000, backoff_s=600) == []
+    assert [r["id"] for r in env.store.untriaged_incoming(since=0)] == [row["id"]]
+    assert len(env.store.untriaged_incoming(since=0, now=1_700_001_600, backoff_s=600)) == 1
+
+
+def test_retry_handles_at_most_five_messages_per_call(flow_env, clock):
+    env = flow_env
+    for i in range(7):
+        _fail_triage(env)
+        env.arrive(str(100 + i), sender=f"P{i} <p{i}@x.org>", subject=f"s{i}", date=1_700_000_100 + i)
+    clock(600)
+    env.llm.fail_next(100)
+    env.flow.retry_untriaged()
+    assert kinds(env).count("draft_failed") == 7 + 5
+
+
+def test_retry_stops_between_messages_when_asked(flow_env, clock):
+    env = flow_env
+    for i in range(3):
+        _fail_triage(env)
+        env.arrive(str(100 + i), sender=f"P{i} <p{i}@x.org>", subject=f"s{i}", date=1_700_000_100 + i)
+    clock(600)
+    asked = []
+
+    def should_stop():
+        asked.append(1)
+        return len(asked) > 1  # stop once the first message is done
+
+    assert env.flow.retry_untriaged(should_stop=should_stop) == 1
+    assert len([r for r in env.store.untriaged_incoming(since=0)]) == 2
+
+
+def test_retry_logs_a_message_gone_from_the_mail_store(flow_env, clock, monkeypatch):
     env = flow_env
     _fail_triage(env)
     row = env.arrive("100")
@@ -466,6 +541,7 @@ def test_retry_logs_a_message_gone_from_the_mail_store(flow_env, monkeypatch):
         raise KeyError(ref.key())
 
     monkeypatch.setattr(env.connector, "fetch", gone)
+    clock(600)
     assert env.flow.retry_untriaged() == 0
     ev = [e for e in env.store.events(limit=50) if e["kind"] == "draft_failed"][0]
     assert json.loads(ev["payload_json"]) == {
@@ -473,7 +549,32 @@ def test_retry_logs_a_message_gone_from_the_mail_store(flow_env, monkeypatch):
     }
 
 
-def test_retry_contains_a_non_llm_error_and_stops_after_three_attempts(flow_env, monkeypatch):
+@pytest.mark.parametrize("error", [OSError("disk gone"), sqlite3.OperationalError("locked")])
+def test_retry_counts_an_unreadable_message_as_an_attempt_and_goes_on(flow_env, clock, monkeypatch, error):
+    env = flow_env
+    _fail_triage(env)
+    older = env.arrive("100", date=1_700_000_500)
+    _fail_triage(env)
+    newer = env.arrive("101", date=1_700_000_600, sender="Bob <bob@x.org>", subject="other")
+    real = env.connector.fetch
+
+    def flaky(ref):
+        if ref.uid == "101":
+            raise error
+        return real(ref)
+
+    monkeypatch.setattr(env.connector, "fetch", flaky)
+    clock(600)
+    assert env.flow.retry_untriaged() == 1  # the older one still gets its go
+    assert env.store.triage_for(older["id"]) is not None
+    fails = [e for e in env.store.events(limit=50)
+             if e["kind"] == "draft_failed" and e["ref"] == newer["ref_key"]]
+    assert len(fails) == 2
+    assert json.loads(fails[0]["payload_json"])["message_id"] == newer["id"]
+    assert str(error) in json.loads(fails[0]["payload_json"])["error"]
+
+
+def test_retry_contains_a_non_llm_error_and_stops_after_three_attempts(flow_env, clock, monkeypatch):
     env = flow_env
     env.llm.fail_next(1)
     older = env.arrive("100", date=1_700_000_500)
@@ -487,13 +588,16 @@ def test_retry_contains_a_non_llm_error_and_stops_after_three_attempts(flow_env,
         return real(cid, msg)
 
     monkeypatch.setattr(env.flow, "on_incoming", flaky)
+    clock(600)
     assert env.flow.retry_untriaged() == 1  # the older one is still triaged
     assert env.store.triage_for(older["id"]) is not None
     assert env.store.triage_for(newer["id"]) is None
     fails = [e for e in env.store.events(limit=50)
              if e["kind"] == "draft_failed" and e["ref"] == newer["ref_key"]]
     assert len(fails) == 2 and "RuntimeError" in fails[0]["payload_json"]
+    clock(1200)
     env.flow.retry_untriaged()
+    clock(86400)
     assert env.flow.retry_untriaged() == 0
     assert env.store.untriaged_incoming(since=0) == []  # three attempts spent
 

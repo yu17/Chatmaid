@@ -66,7 +66,10 @@ def _watch_locked(args: argparse.Namespace, cfg) -> int:
                 flow.retry_untriaged()
             except Exception:
                 log.exception("initial retry of untriaged messages failed")
-            watcher.after_scan = flow.retry_untriaged
+            # a stop requested mid-retry is honoured between messages
+            watcher.after_scan = lambda: flow.retry_untriaged(
+                should_stop=watcher.stop_requested.is_set
+            )
         dbus = "off" if args.no_dbus else "on"
         print(f"watching {len(accounts)} accounts (interval {args.interval}s, dbus {dbus})", flush=True)
         asyncio.run(_watch(watcher))

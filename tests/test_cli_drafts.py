@@ -172,8 +172,8 @@ def test_cli_watch_contains_a_failing_initial_retry(fake_env, store, monkeypatch
 
     calls = []
 
-    def boom():
-        calls.append(1)
+    def boom(**kw):
+        calls.append(kw)
         raise RuntimeError("retry exploded")
 
     flow = SimpleNamespace(retry_untriaged=boom)
@@ -184,6 +184,8 @@ def test_cli_watch_contains_a_failing_initial_retry(fake_env, store, monkeypatch
     monkeypatch.setattr(watch_cmd.asyncio, "run", lambda coro: (seen.update(w=coro.cr_frame.f_locals["watcher"]), coro.close()))
     args = argparse.Namespace(interval=60, no_dbus=True, no_draft=False)
     assert watch_cmd._watch_locked(args, fake_env.config) == 0
-    assert calls == [1]
-    assert seen["w"].after_scan is flow.retry_untriaged
+    assert calls == [{}]
+    with pytest.raises(RuntimeError):
+        seen["w"].after_scan()
+    assert calls[1] == {"should_stop": seen["w"].stop_requested.is_set}
     assert "initial retry" in caplog.text
