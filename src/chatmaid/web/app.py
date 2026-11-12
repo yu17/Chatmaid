@@ -1,5 +1,6 @@
 """The FastAPI app: host check, CSRF token, templates, static files and the Inbox."""
 
+import json
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -414,9 +415,22 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
                 }
                 for r in view["untriaged"]
             ]
+        failures = []
+        for e in view["failures"]:
+            try:
+                payload = json.loads(e["payload_json"] or "{}")
+            except ValueError:
+                payload = {}
+            payload = payload if isinstance(payload, dict) else {}
+            detail = payload.get("error") or e["payload_json"] or ""
+            failures.append({
+                "ts": e["ts"], "kind": e["kind"], "ref": e["ref"], "detail": str(detail),
+                "message_id": payload.get("message_id"),
+            })
         all_jobs = [j for m in untriaged for j in jobs.for_subject("retry", m["id"])]
         return templates.TemplateResponse(
-            request, "status.html", {"view": view, "untriaged": untriaged, "jobs": all_jobs}
+            request, "status.html",
+            {"view": view, "untriaged": untriaged, "jobs": all_jobs, "failures": failures},
         )
 
     def retry_untriaged_message(flow, message_id: int) -> int:
@@ -428,6 +442,8 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
         except (KeyError, OSError):
             raise ValueError("the message is no longer in the mail store") from None
         flow.dispatch("incoming", row["conversation_id"], msg)
+        if flow.store.triage_for(message_id) is None:  # dispatch logs an LLMError and returns
+            raise ValueError("triage failed again; see Recent failures")
         return message_id
 
     @app.post("/status/retry/{message_id}", dependencies=[Depends(check_csrf)])

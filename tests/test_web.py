@@ -567,6 +567,21 @@ def test_retry_button_triages_an_untriaged_message(web_env):
     assert post(web_env, "/status/retry/9999").status_code == 404
 
 
+def test_retry_that_fails_again_shows_as_failed_and_lists_the_error(web_env):
+    import time
+
+    row = untriaged(web_env, "704", date=int(time.time()) - 100)  # recent: no rule decides it
+    web_env.llm.fail_next(10)
+    post(web_env, f"/status/retry/{row['id']}")
+    (job,) = web_env.app.state.jobs.for_subject("retry", row["id"])
+    done = wait_job(web_env.client, job.id)
+    web_env.llm.fail_next(0)
+    assert done["state"] == "failed" and "triage failed again" in done["error"]
+    page = web_env.client.get("/status").text
+    assert "timeout" in page and "{&#34;error&#34;" not in page
+    assert f"/messages/{row['id']}" in page
+
+
 def test_retry_of_a_message_gone_from_the_mail_store_fails_readably(web_env):
     row = untriaged(web_env, "703", date=1_700_000_900)
 

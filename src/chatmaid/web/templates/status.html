@@ -27,6 +27,7 @@
 {% endif %}
 
 <h2>Waiting for triage</h2>
+<p class="meta">A message is retried at most three times, then drops off this list; its failures stay under Recent failures.</p>
 {% if untriaged %}
 <ul class="rows">
   {% for m in untriaged %}
@@ -52,12 +53,12 @@
 {% endif %}
 
 <h2>Recent failures</h2>
-{% if view.failures %}
+{% if failures %}
 <table>
-  <thead><tr><th>When</th><th>Kind</th><th>Ref</th><th>Detail</th></tr></thead>
+  <thead><tr><th>When</th><th>Kind</th><th>Message</th><th>Detail</th></tr></thead>
   <tbody>
-  {% for e in view.failures %}
-  <tr><td>{{ e.ts | when }}</td><td>{{ e.kind }}</td><td>{{ e.ref or "" }}</td><td>{{ e.payload_json or "" }}</td></tr>
+  {% for e in failures %}
+  <tr><td>{{ e.ts | when }}</td><td>{{ e.kind }}</td><td>{% if e.message_id %}<a href="{{ base }}/messages/{{ e.message_id }}">#{{ e.message_id }}</a>{% else %}{{ e.ref or "" }}{% endif %}</td><td>{{ e.detail }}</td></tr>
   {% endfor %}
   </tbody>
 </table>

@@ -237,9 +237,11 @@ button). Configure it in `[web]`:
 - `base_path`: URL prefix when served behind a reverse proxy (default empty).
 
 There is no login: the owner's WireGuard network is the boundary, so do not
-listen on an address that is reachable from outside it. Pages are plain HTTP,
-so the browser has no clipboard API there and Copy falls back to selecting the
-text for you to copy. Every response carries `X-Frame-Options: DENY` and a
+listen on an address that is reachable from outside it. Pages are plain HTTP:
+Copy works on 127.0.0.1 and localhost (secure contexts); on other plain-HTTP
+addresses (e.g. WireGuard), Copy selects the text instead. A message whose
+triage keeps failing is retried at most three times, then drops off the Status
+page's "waiting for triage" list; its failures stay under Recent failures. Every response carries `X-Frame-Options: DENY` and a
 Content-Security-Policy (no inline script or style, no framing, forms post only
 to the app); every POST needs the per-process CSRF token. All assets are served
 by the app.
