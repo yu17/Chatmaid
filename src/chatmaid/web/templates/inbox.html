@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Inbox - chatmaid{% endblock %}
+{% block content %}
+<h1>Inbox</h1>
+<form class="searchbox" action="{{ base }}/search" method="get">
+  <input type="search" name="q" placeholder="Search mail" aria-label="Search">
+  <button type="submit">Search</button>
+</form>
+<p class="chips">
+  {% for f in filters %}
+  <a class="chip{% if f == filter %} on{% endif %}" href="{{ base }}/?filter={{ f }}">{{ f | replace("_", " ") }}</a>
+  {% endfor %}
+</p>
+{% if rows %}
+<ul class="rows">
+  {% for r in rows %}
+  <li>
+    <a href="{{ base }}/messages/{{ r.message_id }}">
+      <span class="sender">{{ r.sender }}</span>
+      <span class="subject">{{ r.subject or "(no subject)" }}</span>
+      <span class="meta">
+        {{ r.sent_at | when }} &middot; {{ r.account }}
+        {% if r.category %}<span class="tag">{{ r.category }}</span>{% endif %}
+        {% if r.triage %}<span class="tag">{{ r.triage | replace("_", " ") }}</span>{% endif %}
+        {% if r.draft_id %}<span class="tag draft">draft pending</span>{% endif %}
+      </span>
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="empty">No mail here.</p>
+{% endif %}
+{% if older %}
+<p><a href="{{ base }}/?filter={{ filter }}&amp;before={{ older }}">older</a></p>
+{% endif %}
+{% endblock %}

@@ -18,6 +18,7 @@ from chatmaid.cli.read import (
     register_senders,
     register_show,
 )
+from chatmaid.cli.serve import register_serve
 from chatmaid.cli.watch import register_watch
 
 
@@ -41,6 +42,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, argparse._SubParsersAction]
     register_drafts(subparsers)
     register_draft(subparsers)
     register_cloud_calls(subparsers)
+    register_serve(subparsers)
     return parser, subparsers
 
 

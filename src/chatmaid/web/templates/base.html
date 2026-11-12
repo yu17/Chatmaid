@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}chatmaid{% endblock %}</title>
+<link rel="stylesheet" href="{{ base }}/static/app.css">
+</head>
+<body>
+<header class="top">
+  <nav>
+    <a href="{{ base }}/">Inbox</a>
+    <a href="{{ base }}/search">Search</a>
+    <a href="{{ base }}/status">Status</a>
+    <a href="{{ base }}/cloud">Cloud</a>
+  </nav>
+</header>
+<main>
+  <div class="flash" id="flash">{% block flash %}{% if flash %}<p>{{ flash }}</p>{% endif %}{% endblock %}</div>
+  {% block content %}{% endblock %}
+</main>
+<script src="{{ base }}/static/app.js" defer></script>
+</body>
+</html>

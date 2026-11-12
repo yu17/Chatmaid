@@ -387,3 +387,26 @@ def flow_env(watch_env):
         return env.store.message_by_ref(SourceRef("evolution", "a1", folder, uid).key())
 
     return SimpleNamespace(**vars(env), llm=llm, flow=flow, arrive=arrive)
+
+
+@pytest.fixture
+def web_env(flow_env, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from chatmaid.cloud.fake import FakeCloud
+    from chatmaid.web.app import create_app
+    from chatmaid.web.services import Services
+
+    env = flow_env
+    index_path = tmp_path / "i.sqlite"  # where the `store` fixture put the index
+
+    services = Services(
+        cfg=env.config,
+        open_store=lambda: Store(index_path, embedding_dim=4),
+        open_connector=lambda: EvolutionConnector(env.cfg, env.accounts, env.owner),
+        make_llm=lambda: env.llm,
+        make_backend=lambda name: FakeCloud(name or "codex", "m", {"text": "ok", "rationale": "ok"}),
+    )
+    app = create_app(services)
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        yield SimpleNamespace(**vars(env), services=services, app=app, client=client)

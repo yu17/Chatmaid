@@ -68,6 +68,14 @@ class CloudConfig:
 
 
 @dataclass(frozen=True)
+class WebConfig:
+    hosts: tuple[str, ...]
+    port: int
+    allowed_hosts: tuple[str, ...]
+    base_path: str
+
+
+@dataclass(frozen=True)
 class Config:
     data: DataConfig
     owner: OwnerConfig
@@ -76,6 +84,7 @@ class Config:
     draft: DraftConfig
     triage: TriageConfig
     cloud: CloudConfig
+    web: WebConfig
 
     @property
     def index_path(self) -> Path:
@@ -125,12 +134,31 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
         "timeout_s": 300,
         "redact_amounts": False,
     },
+    "web": {"hosts": ["127.0.0.1"], "port": 8765, "base_path": ""},  # allowed_hosts defaults to hosts
 }
 
 
 def _resolve(value: str, root: Path) -> Path:
     p = Path(value).expanduser()
     return p if p.is_absolute() else root / p
+
+
+def _host_list(name: str, value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value or not all(isinstance(h, str) and h for h in value):
+        raise ConfigError(f"web.{name} must be a non-empty list of strings, got {value!r}")
+    return tuple(value)
+
+
+def _web_config(w: dict[str, Any]) -> WebConfig:
+    hosts = _host_list("hosts", w["hosts"])
+    allowed = _host_list("allowed_hosts", w["allowed_hosts"]) if "allowed_hosts" in w else hosts
+    port = w["port"]
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise ConfigError(f"web.port must be an integer from 1 to 65535, got {port!r}")
+    base = w["base_path"]
+    if not isinstance(base, str) or (base and (not base.startswith("/") or base.endswith("/"))):
+        raise ConfigError(f"web.base_path must be empty or start with '/' and not end with '/', got {base!r}")
+    return WebConfig(hosts=hosts, port=port, allowed_hosts=allowed, base_path=base)
 
 
 def load(path: Path, *, project_root: Path | None = None) -> Config:
@@ -176,6 +204,7 @@ def load(path: Path, *, project_root: Path | None = None) -> Config:
     lbm = tr["learned_bulk_min"]
     if not isinstance(lbm, int) or isinstance(lbm, bool) or lbm < 1:
         raise ConfigError(f"triage.learned_bulk_min must be an integer >= 1, got {lbm!r}")
+    web = _web_config(section("web"))
     sent = e["local_maildir_sent"]
     return Config(
         data=DataConfig(dir=_resolve(d["dir"], project_root), hot_window_days=d["hot_window_days"]),
@@ -216,6 +245,7 @@ def load(path: Path, *, project_root: Path | None = None) -> Config:
             timeout_s=cl["timeout_s"],
             redact_amounts=cl["redact_amounts"],
         ),
+        web=web,
     )
 
 

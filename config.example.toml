@@ -49,3 +49,9 @@ codex_model = "gpt-6-astra"
 claude_model = ""          # empty: the claude CLI's default model
 timeout_s = 300
 redact_amounts = false     # also replace money amounts with [AMOUNT_n] placeholders
+
+[web]
+hosts = ["127.0.0.1"]  # `chatmaid serve` listens on every address here; add WireGuard addresses (plain HTTP)
+port = 8765
+# allowed_hosts = ["127.0.0.1"]  # Host headers accepted (default: hosts); anything else gets 400
+base_path = ""         # URL prefix when served behind a reverse proxy: empty, or "/x" (no trailing slash)
