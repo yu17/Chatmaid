@@ -400,3 +400,53 @@ def test_app_js_is_loaded_and_has_job_and_copy_behaviour(web_env):
     assert 'src="/static/app.js"' in web_env.client.get("/").text
     js = web_env.client.get("/static/app.js").text
     assert "data-job" in js and "navigator.clipboard.writeText" in js and "isSecureContext" in js
+
+
+def test_sync_draft_actions_work_without_an_lm_studio_token(web_env):
+    from chatmaid.config import ConfigError
+
+    def no_token():
+        raise ConfigError("no token")
+
+    web_env.services.make_llm = no_token
+    row = web_env.arrive("510")
+    did = draft_of(web_env, row)["id"]
+    assert post(web_env, f"/drafts/{did}/dismiss").status_code == 303
+    assert web_env.store.draft(did)["status"] == "dismissed"
+    # a model job without a token is a failed job, not a crash
+    job = web_env.app.state.jobs.submit("draft", "Drafting", row["id"], lambda flow: None)
+    assert wait_job(web_env.client, job.id)["state"] == "failed"
+    assert "no token" in web_env.client.get(f"/messages/{row['id']}").text
+
+
+def test_no_second_job_while_one_is_unfinished(web_env):
+    import threading
+
+    row = web_env.arrive("511")
+    did = draft_of(web_env, row)["id"]
+    jobs = web_env.app.state.jobs
+    gate = threading.Event()
+    jobs.submit("draft", "Drafting a reply", row["id"], lambda flow: gate.wait(5) and None)
+    page = web_env.client.get(f"/messages/{row['id']}")
+    assert "/draft\"" not in page.text.replace(f"/drafts/{did}", "")  # no Draft button
+    assert post(web_env, f"/messages/{row['id']}/draft").status_code == 303
+    assert len(jobs.for_subject("draft", row["id"])) == 1
+    jobs.submit("regenerate", "Regenerating", did, lambda flow: gate.wait(5) and None)
+    r = post(web_env, f"/drafts/{did}/regenerate", comment="again")
+    assert r.status_code == 200 and "Already working on it." in r.text
+    assert len(jobs.for_subject("regenerate", did)) == 1
+    gate.set()
+    for j in jobs.for_subject("", row["id"]) + jobs.for_subject("", did):
+        wait_job(web_env.client, j.id)
+
+
+def test_resolve_does_not_overwrite_a_draft_settled_meanwhile(web_env):
+    import pytest
+
+    row = web_env.arrive("512")
+    did = draft_of(web_env, row)["id"]
+    web_env.store.set_draft_status(did, "superseded")
+    with pytest.raises(ValueError, match=f"draft {did} is superseded, not pending"):
+        web_env.flow._settle(did, "approved", "text")
+    assert web_env.store.draft(did)["status"] == "superseded"
+    assert web_env.store.draft(did)["final_text"] is None

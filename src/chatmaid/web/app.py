@@ -212,6 +212,8 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
             row = store.message(message_id)
         if row is None:
             raise HTTPException(status_code=404, detail="no such message")
+        if request.app.state.jobs.busy("draft", message_id):
+            return redirect(request, f"/messages/{message_id}")  # already queued; the page shows it
         request.app.state.jobs.submit(
             "draft", "Drafting a reply", message_id, lambda flow: flow.draft_for_message(message_id)
         )
@@ -250,7 +252,7 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
             if store.draft(draft_id) is None:
                 raise HTTPException(status_code=404, detail="no such draft")
             try:
-                services.flow(store, connector).resolve(draft_id, action, **kwargs)
+                services.flow(store, connector, model=False).resolve(draft_id, action, **kwargs)
             except ValueError as e:
                 error = str(e)
             else:
@@ -277,6 +279,8 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
             version = int(from_version) if from_version else None
         except ValueError:
             raise HTTPException(status_code=400, detail="bad version") from None
+        if request.app.state.jobs.busy("regenerate", draft_id):
+            return draft_page_response(request, draft_id, flash="Already working on it.")
         request.app.state.jobs.submit(
             "regenerate", "Regenerating", draft_id,
             lambda flow: flow.regenerate(draft_id, comment, from_version=version),

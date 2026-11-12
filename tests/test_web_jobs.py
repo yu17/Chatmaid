@@ -68,3 +68,18 @@ def test_finished_jobs_are_capped():
         assert runner.get(jobs[0].id) is None and runner.get(jobs[-1].id) is not None
     finally:
         runner.stop()
+
+
+def test_stop_does_not_start_a_queued_job():
+    services, _ = stub_services()
+    runner = JobRunner(services)
+    gate, started = threading.Event(), []
+    first = runner.submit("draft", "d", 1, lambda flow: gate.wait(5) and 1)
+    queued = runner.submit("draft", "d", 2, lambda flow: started.append(1))
+    wait_for(lambda: runner.get(first.id).state, lambda s: s == "running")
+    stopper = threading.Thread(target=runner.stop)
+    stopper.start()
+    time.sleep(0.1)
+    gate.set()
+    stopper.join(6)
+    assert started == [] and runner.get(queued.id).state == "queued"

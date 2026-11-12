@@ -53,7 +53,7 @@ class Services:
         finally:
             store.close()
 
-    def flow(self, store: Store, connector: Connector) -> ReplyFlow:
-        return ReplyFlow(
-            store, connector, self.make_llm(), self.cfg, backend_factory=self.make_backend
-        )
+    def flow(self, store: Store, connector: Connector, *, model: bool = True) -> ReplyFlow:
+        """A reply flow; model=False for actions that never call the model (no token needed)."""
+        llm = self.make_llm() if model else None
+        return ReplyFlow(store, connector, llm, self.cfg, backend_factory=self.make_backend)

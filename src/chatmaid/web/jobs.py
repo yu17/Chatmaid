@@ -3,17 +3,22 @@
 import itertools
 import logging
 import queue
+import secrets
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
+from chatmaid.cloud.base import CloudError
+from chatmaid.config import ConfigError
+from chatmaid.llm.base import LLMError
 from chatmaid.reply.flow import ReplyFlow
 from chatmaid.web.services import Services
 
 log = logging.getLogger(__name__)
 KEEP_FINISHED = 200
 UNFINISHED = ("queued", "running")
+EXPECTED_FAILURES = (ValueError, LLMError, CloudError, ConfigError)
 
 
 @dataclass(frozen=True)
@@ -35,6 +40,8 @@ class JobRunner:
         self._fns: queue.Queue[tuple[str, Callable[[ReplyFlow], int | None]] | None] = queue.Queue()
         self._lock = threading.Lock()
         self._ids = itertools.count(1)
+        self._token = secrets.token_hex(3)  # an old page cannot match a new process's job
+        self._stopping = threading.Event()
         self._worker = threading.Thread(target=self._run, name="chatmaid-jobs", daemon=True)
         self._worker.start()
 
@@ -43,7 +50,7 @@ class JobRunner:
     ) -> Job:
         with self._lock:
             job = Job(
-                f"j{next(self._ids)}", kind, label, subject_id, "queued", None, None, time.time()
+                f"{self._token}-{next(self._ids)}", kind, label, subject_id, "queued", None, None, time.time()
             )
             self._jobs[job.id] = job
         self._fns.put((job.id, fn))
@@ -64,7 +71,11 @@ class JobRunner:
         waiting = [j for j in mine if j.state in UNFINISHED]
         return waiting + [j for j in reversed(mine) if j.state not in UNFINISHED]
 
+    def busy(self, kind_prefix: str, subject_id: int) -> bool:
+        return any(j.state in UNFINISHED for j in self.for_subject(kind_prefix, subject_id))
+
     def stop(self) -> None:
+        self._stopping.set()
         self._fns.put(None)
         self._worker.join(timeout=5)
 
@@ -78,11 +89,13 @@ class JobRunner:
     def _run(self) -> None:
         while (item := self._fns.get()) is not None:
             job_id, fn = item
+            if self._stopping.is_set():
+                break
             self._update(job_id, state="running")
             try:
                 with self._services.session() as (store, connector):
                     result = fn(self._services.flow(store, connector))
                 self._update(job_id, state="done", result=result)
             except Exception as e:  # the worker must outlive any single job
-                log.warning("job %s failed: %s", job_id, e)
+                log.warning("job %s failed: %s", job_id, e, exc_info=not isinstance(e, EXPECTED_FAILURES))
                 self._update(job_id, state="failed", error=str(e) or type(e).__name__)

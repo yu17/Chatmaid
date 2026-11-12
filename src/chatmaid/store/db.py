@@ -868,6 +868,15 @@ class Store:
             (status, final_text, outcome_ref, outcome_preview, _now(), draft_id),
         )
 
+    def resolve_pending_draft(self, draft_id: int, status: str, *, final_text: str | None = None) -> bool:
+        """Set the status only if the draft is still pending; False when it no longer is."""
+        cur = self._conn.execute(
+            "UPDATE draft SET status = ?, final_text = COALESCE(?, final_text), updated_at = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (status, final_text, _now(), draft_id),
+        )
+        return cur.rowcount == 1
+
     # --- cloud calls ---
 
     def add_cloud_call(

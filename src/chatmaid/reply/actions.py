@@ -20,6 +20,12 @@ class DraftActionsMixin:
             raise ValueError(f"draft {draft_id} is {draft['status']}, not pending")
         return draft
 
+    def _settle(self, draft_id: int, status: str, final_text: str | None = None) -> None:
+        """Resolve conditionally: a concurrent supersede or second tab must not be overwritten."""
+        if not self.store.resolve_pending_draft(draft_id, status, final_text=final_text):
+            current = self.store.draft(draft_id)
+            raise ValueError(f"draft {draft_id} is {current['status']}, not pending")
+
     def _latest_first(self, draft_id: int) -> sqlite3.Row:
         versions = self.store.draft_versions(draft_id)
         if not versions:
@@ -84,7 +90,7 @@ class DraftActionsMixin:
                     else self._latest_first(draft_id)
                 )
                 final = v["text"]
-            store.set_draft_status(draft_id, "approved", final_text=final)
+            self._settle(draft_id, "approved", final)
         elif action == "edit":
             if not text:
                 raise ValueError("edit needs the new text")
@@ -93,8 +99,8 @@ class DraftActionsMixin:
                     draft_id, round=store.next_round(draft_id), candidate=1, origin="owner",
                     text=text, rationale=None,
                 )
-                store.set_draft_status(draft_id, "edited", final_text=text)
+                self._settle(draft_id, "edited", text)
         elif action == "dismiss":
-            store.set_draft_status(draft_id, "dismissed")
+            self._settle(draft_id, "dismissed")
         else:
             raise ValueError(f"unknown action {action!r}")
