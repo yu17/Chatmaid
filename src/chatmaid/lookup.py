@@ -26,6 +26,7 @@ _STOPWORDS = frozenset(
     "the and for with from that this are was were you your our has have not but all any can "
     "about into what when who how why which re fw fwd".split()
 )
+_UNSAFE = re.compile(r'[\x00-\x1f\x7f"]')  # FTS5 ends a quoted string at NUL; quotes delimit
 _SUBJECT_PREFIX = re.compile(r"^\s*((re|fw|fwd|aw|wg|回复|答复|转发)\s*[:：]\s*)+", re.IGNORECASE)
 
 
@@ -57,12 +58,14 @@ def text_query(query: str) -> tuple[str | None, tuple[str, ...]]:
     raw = re.findall(r"\w+", query)
     words = [w for w in raw if w.lower() not in _STOPWORDS]
     long = list(dict.fromkeys(w for w in words if len(w) >= 3))
+    phrase = " ".join(_UNSAFE.sub(" ", query).split())
     if long:
         terms = [f'"{w}"' for w in long]
-        phrase = " ".join(query.split()).replace('"', "")
         if len(raw) > 1 and len(phrase) >= 3:
             terms.insert(0, f'"{phrase}"')
         return " OR ".join(terms), ()
+    if not raw and len(phrase) >= 3:  # emoji or symbols only: match them as written
+        return f'"{phrase}"', ()
     return None, tuple(dict.fromkeys(words))
 
 
@@ -183,7 +186,7 @@ def related(
     evidence: dict[int, str] = {}
     lists: dict[str, list[int]] = {}
 
-    subject = normalize_subject(conv["title"] or "").replace('"', "")
+    subject = " ".join(_UNSAFE.sub(" ", normalize_subject(conv["title"] or "")).split())
     if len(subject) >= 3:
         hits = store.search_conversations_text(
             match=f'"{subject}"', limit=k, categories=categories

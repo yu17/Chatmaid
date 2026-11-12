@@ -64,6 +64,14 @@ def test_text_query_strips_quotes():
     assert '""' not in match and match.startswith('"say hi there"')
 
 
+def test_text_query_survives_control_characters_and_symbols(store, sample_message):
+    cid = _thread(store, sample_message, "a", "🎉🎉🎉 party", summary="S")
+    assert search(store, None, query="abc\x00def\ttab") == []  # no FTS5 syntax error
+    assert [h.conversation_id for h in search(store, None, query="🎉🎉🎉")] == [cid]
+    nul = _thread(store, sample_message, "b", 'Odd "subject"\x00 here', summary="S")
+    related(store, None, nul)  # the subject phrase is sanitized too
+
+
 def test_normalize_subject_strips_reply_prefixes():
     assert normalize_subject("Re: Fwd: 回复：Lab move") == "Lab move"
     assert normalize_subject("RE:re: x") == "x"

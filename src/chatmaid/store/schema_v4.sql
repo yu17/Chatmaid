@@ -8,7 +8,8 @@ CREATE TRIGGER conversation_fts_conv_insert AFTER INSERT ON conversation BEGIN
     VALUES (new.id, coalesce(new.title, ''), coalesce(new.summary, ''), '');
 END;
 
-CREATE TRIGGER conversation_fts_conv_update AFTER UPDATE OF title, summary ON conversation BEGIN
+CREATE TRIGGER conversation_fts_conv_update AFTER UPDATE OF title, summary ON conversation
+WHEN old.title IS NOT new.title OR old.summary IS NOT new.summary BEGIN
     UPDATE conversation_fts SET title = coalesce(new.title, ''), summary = coalesce(new.summary, '')
     WHERE rowid = new.id;
 END;
@@ -24,7 +25,10 @@ CREATE TRIGGER conversation_fts_msg_insert AFTER INSERT ON message BEGIN
     ) WHERE rowid = new.conversation_id;
 END;
 
-CREATE TRIGGER conversation_fts_msg_update AFTER UPDATE OF conversation_id, subject, preview ON message BEGIN
+-- Re-ingest rewrites rows unchanged (ON CONFLICT DO UPDATE); only real changes rebuild the body.
+CREATE TRIGGER conversation_fts_msg_update AFTER UPDATE OF conversation_id, subject, preview ON message
+WHEN old.conversation_id IS NOT new.conversation_id OR old.subject IS NOT new.subject
+    OR old.preview IS NOT new.preview BEGIN
     UPDATE conversation_fts SET body = (
         SELECT coalesce(group_concat(coalesce(m.subject, '') || ' ' || coalesce(m.preview, ''), char(10)), '')
         FROM message m WHERE m.conversation_id = old.conversation_id
