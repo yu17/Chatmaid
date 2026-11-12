@@ -531,3 +531,51 @@ def test_cloud_audit_lists_calls(web_env):
     assert post(web_env, "/cloud/9999/send").status_code == 404
     assert post(web_env, "/cloud/9999/decline").status_code == 404
     assert post(web_env, f"/drafts/{did}/cloud", backend="gpt").status_code == 400
+
+
+def untriaged(web_env, uid, **kw):
+    web_env.llm.fail_next(10)  # triage fails, so the message stays untriaged
+    try:
+        row = web_env.arrive(uid, **kw)
+    finally:
+        web_env.llm.fail_next(0)
+    assert web_env.store.triage_for(row["id"]) is None
+    return row
+
+
+def test_status_page_shows_counts_failures_and_untriaged(web_env):
+    web_env.app.state.now = lambda: 1_700_001_000  # the fixtures' clock
+    web_env.arrive("700")
+    row = untriaged(web_env, "701", subject="<i>stuck</i>", date=1_700_000_900)
+    web_env.store.log_event("reply", "error", "x", {"error": "boom <b>bad</b>"})
+    page = web_env.client.get("/status").text
+    assert "Messages" in page and "Summarized" in page and "Pending summary" in page
+    assert "Recent failures" in page and "Recent events" in page
+    assert f"/status/retry/{row['id']}" in page and 'name="csrf"' in page
+    assert "&lt;i&gt;stuck&lt;/i&gt;" in page and "<i>stuck" not in page
+    assert "boom &lt;b&gt;bad&lt;/b&gt;" in page and "<b>bad" not in page
+
+
+def test_retry_button_triages_an_untriaged_message(web_env):
+    row = untriaged(web_env, "702", date=1_700_000_900)
+    assert post(web_env, f"/status/retry/{row['id']}").status_code == 303
+    (job,) = web_env.app.state.jobs.for_subject("retry", row["id"])
+    assert wait_job(web_env.client, job.id)["state"] == "done"
+    assert web_env.store.triage_for(row["id"]) is not None
+    assert f"/status/retry/{row['id']}" not in web_env.client.get("/status").text
+    assert web_env.client.post(f"/status/retry/{row['id']}").status_code == 403
+    assert post(web_env, "/status/retry/9999").status_code == 404
+
+
+def test_retry_of_a_message_gone_from_the_mail_store_fails_readably(web_env):
+    row = untriaged(web_env, "703", date=1_700_000_900)
+
+    def gone(ref):
+        raise KeyError(ref)
+
+    web_env.connector.fetch = gone
+    web_env.services.open_connector = lambda: web_env.connector
+    post(web_env, f"/status/retry/{row['id']}")
+    (job,) = web_env.app.state.jobs.for_subject("retry", row["id"])
+    done = wait_job(web_env.client, job.id)
+    assert done["state"] == "failed" and "mail store" in done["error"]

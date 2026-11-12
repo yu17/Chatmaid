@@ -17,8 +17,8 @@ Phase 1b adds reply drafting: incoming mail is triaged by a local model, and
 conversations that need a reply get candidate drafts written in the owner's
 style. A draft can be revised from a comment, and improved by an online model
 only with the owner's explicit consent per call, on a pseudonymized payload.
-Everything is driven from the CLI. Nothing is sent or written to a mail server.
-A UI comes later; research notes are in [`docs/research/`](docs/research/README.md).
+Everything is driven from the CLI or the web UI (`chatmaid serve`). Nothing is
+sent or written to a mail server. Research notes are in [`docs/research/`](docs/research/README.md).
 
 ## Guiding constraints
 
@@ -91,6 +91,7 @@ Run commands as `uv run chatmaid [--config PATH] <command>` (default config is
 | `draft dismiss ID` | | dismiss a draft |
 | `draft cloud ID` | `--backend {codex,claude}`, `--comment TEXT`, `--from VERSION`, `--fake-llm` | propose a cloud improvement and print the exact payload |
 | `draft send ID` / `draft decline ID` | | send a proposed payload to the backend, or decline it |
+| `serve` | `--port N` | run the web UI until interrupted: Inbox, message and conversation pages with related mail, search, drafting, cloud improvement and status (see Web UI); listens on every `[web] hosts` address, on `[web] port` unless `--port` is given |
 | `cloud-calls` | `--limit N` | list cloud proposals and calls |
 | `cloud-check` | `--backend {codex,claude}` | send a canned, content-free prompt through a cloud CLI |
 
@@ -219,6 +220,35 @@ line of defence:
 `--bare` cannot be used with claude: it restricts auth to `ANTHROPIC_API_KEY`,
 and the owner is logged in through OAuth. `cloud-check` exercises each backend
 with a canned prompt that carries no mail content.
+
+## Web UI
+
+`chatmaid serve` runs the same flows in a browser: the Inbox, message and
+conversation pages with related mail, search, drafting (draft, regenerate,
+approve, edit, dismiss), cloud improvement, the cloud audit list, and a Status
+page (index counts, failures, and messages waiting for triage with a Retry
+button). Configure it in `[web]`:
+
+- `hosts`: addresses to listen on (default `["127.0.0.1"]`); add the machine's
+  WireGuard addresses to reach it from other devices.
+- `port` (default `8765`); `--port` overrides it.
+- `allowed_hosts`: `Host` headers accepted (default: `hosts`); anything else
+  gets 400.
+- `base_path`: URL prefix when served behind a reverse proxy (default empty).
+
+There is no login: the owner's WireGuard network is the boundary, so do not
+listen on an address that is reachable from outside it. Pages are plain HTTP,
+so the browser has no clipboard API there and Copy falls back to selecting the
+text for you to copy. Every response carries `X-Frame-Options: DENY` and a
+Content-Security-Policy (no inline script or style, no framing, forms post only
+to the app); every POST needs the per-process CSRF token. All assets are served
+by the app.
+
+Model work (drafting, regenerating, retrying triage, cloud calls) runs one job
+at a time in the background; the pages stay responsive and show queued, running
+and failed jobs. Cloud improvement always shows the pseudonymized payload first;
+nothing leaves the machine until you press the separate Send. Approve records
+your choice; you still send the reply yourself.
 
 ## What stays read-only
 

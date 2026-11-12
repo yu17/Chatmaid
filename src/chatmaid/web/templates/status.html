@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Status - chatmaid{% endblock %}
+{% block content %}
+<h1>Status</h1>
+{% include "_jobs.html" %}
+
+<h2>Index</h2>
+<table>
+  <tbody>
+  {% for name, n in view.counts.items() %}
+  <tr><th>{{ name | replace("_", " ") | capitalize }}</th><td>{{ n }}</td></tr>
+  {% endfor %}
+  <tr><th>Summarized conversations</th><td>{{ view.with_summary }}</td></tr>
+  <tr><th>Pending summary</th><td>{{ view.without_summary }}</td></tr>
+  </tbody>
+</table>
+
+{% if view.categories %}
+<h2>Categories</h2>
+<table>
+  <tbody>
+  {% for name, n in view.categories.items() %}
+  <tr><th>{{ name }}</th><td>{{ n }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Waiting for triage</h2>
+{% if untriaged %}
+<ul class="rows">
+  {% for m in untriaged %}
+  <li>
+    <a href="{{ base }}/messages/{{ m.id }}">
+      <span class="sender">{{ m.sender }}</span>
+      <span class="subject">{{ m.subject or "(no subject)" }}</span>
+      <span class="meta">{{ m.sent_at | when }}</span>
+    </a>
+    {% if m.busy %}
+    <span class="meta">retrying&hellip;</span>
+    {% else %}
+    <form method="post" action="{{ base }}/status/retry/{{ m.id }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit">Retry</button>
+    </form>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="empty">Nothing is waiting for triage.</p>
+{% endif %}
+
+<h2>Recent failures</h2>
+{% if view.failures %}
+<table>
+  <thead><tr><th>When</th><th>Kind</th><th>Ref</th><th>Detail</th></tr></thead>
+  <tbody>
+  {% for e in view.failures %}
+  <tr><td>{{ e.ts | when }}</td><td>{{ e.kind }}</td><td>{{ e.ref or "" }}</td><td>{{ e.payload_json or "" }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">No failures logged.</p>
+{% endif %}
+
+<h2>Recent events</h2>
+{% if view.recent_events %}
+<table>
+  <thead><tr><th>When</th><th>Source</th><th>Kind</th><th>Ref</th></tr></thead>
+  <tbody>
+  {% for e in view.recent_events[:20] %}
+  <tr><td>{{ e.ts | when }}</td><td>{{ e.source }}</td><td>{{ e.kind }}</td><td>{{ e.ref or "" }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">No events yet.</p>
+{% endif %}
+{% endblock %}

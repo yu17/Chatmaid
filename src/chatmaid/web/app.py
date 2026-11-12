@@ -1,6 +1,7 @@
 """The FastAPI app: host check, CSRF token, templates, static files and the Inbox."""
 
 import secrets
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +20,7 @@ from chatmaid.init.categories import CATEGORIES
 from chatmaid.llm.base import LLMError
 from chatmaid.lookup import related, search
 from chatmaid.model import SourceRef
-from chatmaid.views import account_labels, conversation_view, inbox, message_view
+from chatmaid.views import account_labels, conversation_view, inbox, message_view, status_view
 from chatmaid.web.jobs import JobRunner
 from chatmaid.web.services import Services
 
@@ -88,6 +89,7 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
     )
     app.state.services = services
     app.state.jobs = jobs
+    app.state.now = time.time  # tests replace it
     app.state.csrf = secrets.token_urlsafe(32)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     allowed = frozenset(h.lower() for h in cfg.web.allowed_hosts)
@@ -396,6 +398,50 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
         if error is not None:
             return call_page_response(request, call_id, flash=error)
         return redirect(request, f"/cloud/{call_id}")
+
+    @app.get("/status")
+    def status_page(request: Request):
+        jobs = request.app.state.jobs
+        with services.session() as (store, _connector):
+            view = status_view(
+                store, max_age_days=cfg.draft.max_age_days, now=int(request.app.state.now())
+            )
+            untriaged = [
+                {
+                    "id": r["id"], "subject": r["subject"], "sent_at": r["sent_at"],
+                    "sender": store.identity_label(r["sender_identity_id"]),
+                    "busy": jobs.busy("retry", r["id"]),
+                }
+                for r in view["untriaged"]
+            ]
+        all_jobs = [j for m in untriaged for j in jobs.for_subject("retry", m["id"])]
+        return templates.TemplateResponse(
+            request, "status.html", {"view": view, "untriaged": untriaged, "jobs": all_jobs}
+        )
+
+    def retry_untriaged_message(flow, message_id: int) -> int:
+        row = flow.store.message(message_id)
+        if row is None:
+            raise ValueError(f"message {message_id} is not in the index")
+        try:
+            msg = flow.connector.fetch(SourceRef.from_key(row["ref_key"]))
+        except (KeyError, OSError):
+            raise ValueError("the message is no longer in the mail store") from None
+        flow.dispatch("incoming", row["conversation_id"], msg)
+        return message_id
+
+    @app.post("/status/retry/{message_id}", dependencies=[Depends(check_csrf)])
+    def retry_message(request: Request, message_id: int):
+        with services.session() as (store, _connector):
+            row = store.message(message_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="no such message")
+        if not request.app.state.jobs.busy("retry", message_id):
+            request.app.state.jobs.submit(
+                "retry", f"Retrying message {message_id}", message_id,
+                lambda flow: retry_untriaged_message(flow, message_id),
+            )
+        return redirect(request, "/status")
 
     @app.get("/jobs/{job_id}")
     def job_state(request: Request, job_id: str):
