@@ -90,7 +90,7 @@ class Watcher:
             self._run_after_scan()
 
     def _run_after_scan(self) -> None:
-        if self.after_scan is None:
+        if self.after_scan is None or self.stop_requested.is_set():
             return
         try:
             self.after_scan()

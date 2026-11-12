@@ -162,3 +162,28 @@ def test_drafts_reports_missing_account_without_traceback(fake_env, capsys):
     assert main(["--config", str(fake_env.config_path), "drafts"]) == 1
     err = capsys.readouterr().err
     assert "no Evolution .source file for account 'nope'" in err and "Traceback" not in err
+
+
+def test_cli_watch_contains_a_failing_initial_retry(fake_env, store, monkeypatch, caplog):
+    import argparse
+    from types import SimpleNamespace
+
+    from chatmaid.cli import watch as watch_cmd
+
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("retry exploded")
+
+    flow = SimpleNamespace(retry_untriaged=boom)
+    monkeypatch.setattr(
+        "chatmaid.cli.common.open_flow", lambda cfg, need_llm: (store, fake_env.connector, flow)
+    )
+    seen = {}
+    monkeypatch.setattr(watch_cmd.asyncio, "run", lambda coro: (seen.update(w=coro.cr_frame.f_locals["watcher"]), coro.close()))
+    args = argparse.Namespace(interval=60, no_dbus=True, no_draft=False)
+    assert watch_cmd._watch_locked(args, fake_env.config) == 0
+    assert calls == [1]
+    assert seen["w"].after_scan is flow.retry_untriaged
+    assert "initial retry" in caplog.text

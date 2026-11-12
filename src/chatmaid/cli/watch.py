@@ -15,6 +15,8 @@ from chatmaid.connectors.evolution.events import EventSource
 from chatmaid.daemon import Watcher
 from chatmaid.lock import Busy, exclusive
 
+log = logging.getLogger(__name__)
+
 
 async def _watch(watcher: Watcher) -> None:
     stop = asyncio.Event()
@@ -60,7 +62,10 @@ def _watch_locked(args: argparse.Namespace, cfg) -> int:
 
         watcher.on_routed = show
         if not args.no_draft:
-            flow.retry_untriaged()
+            try:
+                flow.retry_untriaged()
+            except Exception:
+                log.exception("initial retry of untriaged messages failed")
             watcher.after_scan = flow.retry_untriaged
         dbus = "off" if args.no_dbus else "on"
         print(f"watching {len(accounts)} accounts (interval {args.interval}s, dbus {dbus})", flush=True)

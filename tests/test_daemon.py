@@ -327,3 +327,12 @@ def test_after_scan_runs_after_each_trigger_and_its_errors_are_contained(watch_e
 
     env.watcher.after_scan = boom
     env.watcher.handle_trigger("timer")  # must not raise
+
+
+def test_after_scan_is_skipped_once_stop_is_requested(watch_env):
+    w = watch_env.watcher
+    seen = []
+    w.after_scan = lambda: seen.append(1)
+    w.stop_requested.set()
+    w.handle_trigger("timer")
+    assert seen == []

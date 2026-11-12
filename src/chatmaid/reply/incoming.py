@@ -1,9 +1,14 @@
 """Routine B: triage an incoming message and draft a reply."""
 
+import logging
+
 from chatmaid.model import NormalizedMessage, SourceRef
 from chatmaid.reply.context import build_context
 from chatmaid.reply.drafting import draft_reply
 from chatmaid.triage.classify import triage_message
+
+
+log = logging.getLogger(__name__)
 
 
 class IncomingMixin:
@@ -22,7 +27,14 @@ class IncomingMixin:
                     {"error": "gone from the mail store", "message_id": row["id"]},
                 )
                 continue
-            self.dispatch("incoming", row["conversation_id"], msg)
+            try:
+                self.dispatch("incoming", row["conversation_id"], msg)
+            except Exception as e:  # counts as an attempt, and must not block older messages
+                log.exception("retry of message %s failed", row["id"])
+                store.log_event(
+                    "reply", "draft_failed", ref, {"error": repr(e), "message_id": row["id"]}
+                )
+                continue
             if store.triage_for(row["id"]) is not None:
                 done += 1
         return done

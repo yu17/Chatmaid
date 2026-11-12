@@ -471,3 +471,28 @@ def test_retry_logs_a_message_gone_from_the_mail_store(flow_env, monkeypatch):
     assert json.loads(ev["payload_json"]) == {
         "error": "gone from the mail store", "message_id": row["id"],
     }
+
+
+def test_retry_contains_a_non_llm_error_and_stops_after_three_attempts(flow_env, monkeypatch):
+    env = flow_env
+    env.llm.fail_next(1)
+    older = env.arrive("100", date=1_700_000_500)
+    env.llm.fail_next(1)
+    newer = env.arrive("101", date=1_700_000_600, sender="Bob <bob@x.org>", subject="other")
+    real = env.flow.on_incoming
+
+    def flaky(cid, msg):
+        if msg.ref.uid == "101":
+            raise RuntimeError("boom")
+        return real(cid, msg)
+
+    monkeypatch.setattr(env.flow, "on_incoming", flaky)
+    assert env.flow.retry_untriaged() == 1  # the older one is still triaged
+    assert env.store.triage_for(older["id"]) is not None
+    assert env.store.triage_for(newer["id"]) is None
+    fails = [e for e in env.store.events(limit=50)
+             if e["kind"] == "draft_failed" and e["ref"] == newer["ref_key"]]
+    assert len(fails) == 2 and "RuntimeError" in fails[0]["payload_json"]
+    env.flow.retry_untriaged()
+    assert env.flow.retry_untriaged() == 0
+    assert env.store.untriaged_incoming(since=0) == []  # three attempts spent
