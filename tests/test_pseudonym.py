@@ -138,3 +138,10 @@ def test_phone_numbers_do_not_join_across_lines():
     out = p.redact("Order 123\n456 7890 thanks\nCall 312-555-0142\nnext 99")
     assert all("\n" not in original for original in p.mapping.values())
     assert "Order 123\n" in out and "\nnext 99" in out
+    assert "[PHONE_1]" in out and "312-555-0142" not in out  # the separate-line number is still redacted
+
+
+def test_phone_numbers_with_unicode_spaces_are_redacted():
+    for sep in (" ", "　", " "):
+        out = Pseudonymizer([]).redact(f"call +86{sep}138{sep}0013{sep}8000 now")
+        assert "138" not in out and "[PHONE_1]" in out, repr(sep)
