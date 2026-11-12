@@ -372,9 +372,25 @@ def test_action_on_a_draft_no_longer_pending_shows_the_error(web_env):
         ("regenerate", {"comment": "again"}),
     ):
         r = post(web_env, f"/drafts/{did}/{action}", **data)
-        assert r.status_code == 200, action
-        assert f"draft {did} is dismissed, not pending" in r.text
+        assert r.status_code == 303, action
+        assert r.headers["location"] == f"/drafts/{did}?flash=not_pending", action
+        page = web_env.client.get(r.headers["location"]).text
+        assert "This draft is no longer pending; nothing was changed." in page
+        assert "dismissed" in page  # the draft's current state
     assert web_env.app.state.jobs.for_subject("regenerate", did) == []
+
+
+def test_flash_shows_only_fixed_texts(web_env):
+    row = web_env.arrive("508")
+    did = draft_of(web_env, row)["id"]
+    page = web_env.client.get(f"/drafts/{did}", params={"flash": "<b>arbitrary words</b>"}).text
+    assert "arbitrary words" not in page
+    r = post(web_env, f"/drafts/{did}/regenerate", comment="  ")
+    assert r.status_code == 303 and r.headers["location"].endswith("?flash=need_comment")
+    assert "Say what to change first." in web_env.client.get(r.headers["location"]).text
+    r = post(web_env, f"/drafts/{did}/edit", text="   ")
+    assert r.status_code == 303 and r.headers["location"].endswith("?flash=need_text")
+    assert web_env.store.draft(did)["status"] == "pending"
 
 
 def test_unknown_draft_is_404(web_env):
@@ -400,6 +416,8 @@ def test_app_js_is_loaded_and_has_job_and_copy_behaviour(web_env):
     assert 'src="/static/app.js"' in web_env.client.get("/").text
     js = web_env.client.get("/static/app.js").text
     assert "data-job" in js and "navigator.clipboard.writeText" in js and "isSecureContext" in js
+    # a finished job reloads the GET page (never re-POSTs) without the earlier notice
+    assert 'searchParams.delete("flash")' in js and "location.reload" not in js
 
 
 def test_sync_draft_actions_work_without_an_lm_studio_token(web_env):
@@ -433,8 +451,13 @@ def test_no_second_job_while_one_is_unfinished(web_env):
     assert len(jobs.for_subject("draft", row["id"])) == 1
     jobs.submit("regenerate", "Regenerating", did, lambda flow: gate.wait(5) and None)
     r = post(web_env, f"/drafts/{did}/regenerate", comment="again")
-    assert r.status_code == 200 and "Already working on it." in r.text
+    assert r.status_code == 303 and "data-job" not in r.text
+    assert r.headers["location"] == f"/drafts/{did}?flash=busy"
+    assert "Already working on it." in web_env.client.get(r.headers["location"]).text
     assert len(jobs.for_subject("regenerate", did)) == 1
+    jobs.submit("propose", "Preparing", did, lambda flow: gate.wait(5) and None)
+    r = post(web_env, f"/drafts/{did}/cloud")
+    assert r.status_code == 303 and r.headers["location"] == f"/drafts/{did}?flash=proposal_busy"
     gate.set()
     for j in jobs.for_subject("", row["id"]) + jobs.for_subject("", did):
         wait_job(web_env.client, j.id)
@@ -501,7 +524,10 @@ def test_cloud_flow_shows_payload_before_send_and_nothing_is_sent_until_send(web
     assert web_env.store.cloud_call(call_id)["status"] == "sent"
     # a second Send shows the error and sends nothing more
     again = post(web_env, f"/cloud/{call_id}/send")
-    assert again.status_code == 200 and "not proposed" in again.text
+    assert again.status_code == 303
+    assert again.headers["location"] == f"/cloud/{call_id}?flash=not_proposed"
+    page = web_env.client.get(again.headers["location"]).text
+    assert "no longer proposed; nothing was sent" in page
     assert sum(len(f.prompts) for f in fakes) == 1
 
 
@@ -517,7 +543,9 @@ def test_decline_marks_the_call_declined(web_env):
     assert all(f.prompts == [] for f in fakes)
     page = web_env.client.get(f"/cloud/{call_id}").text
     assert "Send this to" not in page and "declined" in page
-    assert "not proposed" in post(web_env, f"/cloud/{call_id}/decline").text
+    again = post(web_env, f"/cloud/{call_id}/decline")
+    assert again.status_code == 303
+    assert again.headers["location"] == f"/cloud/{call_id}?flash=not_proposed"
 
 
 def test_cloud_audit_lists_calls(web_env):

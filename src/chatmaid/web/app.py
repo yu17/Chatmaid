@@ -1,6 +1,7 @@
 """The FastAPI app: host check, CSRF token, templates, static files and the Inbox."""
 
 import json
+import logging
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -25,6 +26,7 @@ from chatmaid.views import account_labels, conversation_view, inbox, message_vie
 from chatmaid.web.jobs import JobRunner
 from chatmaid.web.services import Services
 
+log = logging.getLogger(__name__)
 HERE = Path(__file__).parent
 PAGE_SIZE = 50
 RELATED_LIMIT = 10
@@ -40,6 +42,18 @@ SECURITY_HEADERS = {
 CLOUD_BACKENDS = ("codex", "claude")
 CLOUD_LIST_LIMIT = 200
 INBOX_FILTERS = ("default", "needs_reply", "drafts", "all", *CATEGORIES)
+# Every POST redirects (303) to a GET page; a notice travels as one of these keys, never as
+# text from the URL.
+FLASHES = {
+    "busy": "Already working on it.",
+    "proposal_busy": "Already preparing a proposal.",
+    "need_comment": "Say what to change first.",
+    "need_text": "Write the new text first.",
+    "not_pending": "This draft is no longer pending; nothing was changed.",
+    "not_proposed": "This cloud call is no longer proposed; nothing was sent.",
+    "not_untriaged": "That message is not waiting for triage.",
+    "failed": "That did not work; the page shows the current state.",
+}
 
 
 def _context(request: Request) -> dict:
@@ -208,7 +222,11 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
              "categories": CATEGORIES, "hits": hits, "notice": notice},
         )
 
-    def redirect(request: Request, path: str) -> RedirectResponse:
+    def redirect(request: Request, path: str, flash: str | None = None) -> RedirectResponse:
+        if flash is not None:
+            if flash not in FLASHES:
+                raise KeyError(flash)  # only the fixed notices travel in the URL
+            path += f"?flash={flash}"
         return RedirectResponse(request.scope.get("root_path", "") + path, status_code=303)
 
     @app.post("/messages/{message_id}/draft", dependencies=[Depends(check_csrf)])
@@ -224,7 +242,8 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
         )
         return redirect(request, f"/messages/{message_id}")
 
-    def draft_page_response(request: Request, draft_id: int, flash: str | None = None):
+    @app.get("/drafts/{draft_id}")
+    def draft_page(request: Request, draft_id: int, flash: str = ""):
         with services.session() as (store, connector):
             draft = store.draft(draft_id)
             if draft is None:
@@ -250,27 +269,26 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
                      if c["draft_id"] == draft_id and c["status"] == "proposed"
                  ],
                  "backends": CLOUD_BACKENDS, "default_backend": cfg.cloud.default_backend,
-                 "flash": flash},
+                 "flash": FLASHES.get(flash)},
             )
 
-    @app.get("/drafts/{draft_id}")
-    def draft_page(request: Request, draft_id: int):
-        return draft_page_response(request, draft_id)
-
     def act(request: Request, draft_id: int, action: str, **kwargs):
-        """Run a synchronous draft action; a refusal comes back as a message on the page."""
+        """Run a synchronous draft action; a refusal comes back as a notice on the page."""
+        flash = None
         with services.session() as (store, connector):
             if store.draft(draft_id) is None:
                 raise HTTPException(status_code=404, detail="no such draft")
             try:
                 services.flow(store, connector, model=False).resolve(draft_id, action, **kwargs)
             except ValueError as e:
-                error = str(e)
-            else:
-                error = None
-        if error is not None:
-            return draft_page_response(request, draft_id, flash=error)
-        return redirect(request, f"/drafts/{draft_id}")
+                log.info("draft %s: %s refused: %s", draft_id, action, e)
+                if store.draft(draft_id)["status"] != "pending":
+                    flash = "not_pending"
+                elif action == "edit" and not kwargs.get("text"):
+                    flash = "need_text"
+                else:
+                    flash = "failed"
+        return redirect(request, f"/drafts/{draft_id}", flash)
 
     @app.post("/drafts/{draft_id}/regenerate", dependencies=[Depends(check_csrf)])
     def regenerate_draft(
@@ -281,17 +299,15 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
             if draft is None:
                 raise HTTPException(status_code=404, detail="no such draft")
         if draft["status"] != "pending":
-            return draft_page_response(
-                request, draft_id, flash=f"draft {draft_id} is {draft['status']}, not pending"
-            )
+            return redirect(request, f"/drafts/{draft_id}", "not_pending")
         if not comment.strip():
-            return draft_page_response(request, draft_id, flash="Say what to change first.")
+            return redirect(request, f"/drafts/{draft_id}", "need_comment")
         try:
             version = int(from_version) if from_version else None
         except ValueError:
             raise HTTPException(status_code=400, detail="bad version") from None
         if request.app.state.jobs.busy("regenerate", draft_id):
-            return draft_page_response(request, draft_id, flash="Already working on it.")
+            return redirect(request, f"/drafts/{draft_id}", "busy")
         request.app.state.jobs.submit(
             "regenerate", "Regenerating", draft_id,
             lambda flow: flow.regenerate(draft_id, comment, from_version=version),
@@ -332,11 +348,9 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
         if draft is None:
             raise HTTPException(status_code=404, detail="no such draft")
         if draft["status"] != "pending":
-            return draft_page_response(
-                request, draft_id, flash=f"draft {draft_id} is {draft['status']}, not pending"
-            )
+            return redirect(request, f"/drafts/{draft_id}", "not_pending")
         if request.app.state.jobs.busy("propose", draft_id):
-            return draft_page_response(request, draft_id, flash="Already preparing a proposal.")
+            return redirect(request, f"/drafts/{draft_id}", "proposal_busy")
         request.app.state.jobs.submit(
             "propose", "Preparing the cloud payload", draft_id,
             lambda flow: flow.propose_cloud(
@@ -345,7 +359,14 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
         )
         return redirect(request, f"/drafts/{draft_id}")
 
-    def call_page_response(request: Request, call_id: int, flash: str | None = None):
+    @app.get("/cloud")
+    def cloud_page(request: Request):
+        with services.session() as (store, _connector):
+            calls = store.cloud_calls(limit=CLOUD_LIST_LIMIT)
+        return templates.TemplateResponse(request, "cloud.html", {"calls": calls})
+
+    @app.get("/cloud/{call_id}")
+    def cloud_call_page(request: Request, call_id: int, flash: str = ""):
         with services.session() as (store, _connector):
             call = store.cloud_call(call_id)
             if call is None:
@@ -354,18 +375,8 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
             return templates.TemplateResponse(
                 request, "cloud_call.html",
                 {"call": call, "jobs": request.app.state.jobs.for_subject("send", call_id),
-                 "flash": flash},
+                 "flash": FLASHES.get(flash)},
             )
-
-    @app.get("/cloud")
-    def cloud_page(request: Request):
-        with services.session() as (store, _connector):
-            calls = store.cloud_calls(limit=CLOUD_LIST_LIMIT)
-        return templates.TemplateResponse(request, "cloud.html", {"calls": calls})
-
-    @app.get("/cloud/{call_id}")
-    def cloud_call_page(request: Request, call_id: int):
-        return call_page_response(request, call_id)
 
     @app.post("/cloud/{call_id}/send", dependencies=[Depends(check_csrf)])
     def send_call(request: Request, call_id: int):
@@ -375,9 +386,7 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
         if call is None:
             raise HTTPException(status_code=404, detail="no such cloud call")
         if call["status"] != "proposed":
-            return call_page_response(
-                request, call_id, flash=f"cloud call {call_id} is {call['status']}, not proposed"
-            )
+            return redirect(request, f"/cloud/{call_id}", "not_proposed")
         if request.app.state.jobs.busy("send", call_id):
             return redirect(request, f"/cloud/{call_id}")  # already queued; the page shows it
         request.app.state.jobs.submit(
@@ -393,15 +402,12 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
             try:
                 services.flow(store, connector, model=False).decline_cloud(call_id)
             except ValueError as e:
-                error = str(e)
-            else:
-                error = None
-        if error is not None:
-            return call_page_response(request, call_id, flash=error)
+                log.info("cloud call %s: decline refused: %s", call_id, e)
+                return redirect(request, f"/cloud/{call_id}", "not_proposed")
         return redirect(request, f"/cloud/{call_id}")
 
     @app.get("/status")
-    def status_page(request: Request):
+    def status_page(request: Request, flash: str = ""):
         jobs = request.app.state.jobs
         with services.session() as (store, _connector):
             view = status_view(
@@ -430,7 +436,8 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
         all_jobs = [j for m in untriaged for j in jobs.for_subject("retry", m["id"])]
         return templates.TemplateResponse(
             request, "status.html",
-            {"view": view, "untriaged": untriaged, "jobs": all_jobs, "failures": failures},
+            {"view": view, "untriaged": untriaged, "jobs": all_jobs, "failures": failures,
+             "flash": FLASHES.get(flash)},
         )
 
     def retry_untriaged_message(flow, message_id: int) -> int:

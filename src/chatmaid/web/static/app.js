@@ -17,7 +17,10 @@
         .then(function (job) {
           if (job && (job.state === "done" || job.state === "failed")) {
             clearInterval(timer);
-            window.location.reload();
+            // reload with GET (every POST redirected here) and without the earlier notice
+            var url = new URL(window.location.href);
+            url.searchParams.delete("flash");
+            window.location.replace(url.toString());
           }
         })
         .catch(function () {
