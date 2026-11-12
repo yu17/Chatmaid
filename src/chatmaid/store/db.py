@@ -790,6 +790,20 @@ class Store:
             (conversation_id,),
         ).fetchone()
 
+    def unmatched_resolved_draft(self, conversation_id: int, *, before: int) -> sqlite3.Row | None:
+        """Newest approved or edited draft still waiting for the owner's sent mail."""
+        return self._conn.execute(
+            "SELECT * FROM draft WHERE conversation_id = ? AND status IN ('approved', 'edited') "
+            "AND outcome_ref IS NULL AND created_at <= ? ORDER BY created_at DESC, id DESC LIMIT 1",
+            (conversation_id, before),
+        ).fetchone()
+
+    def set_draft_outcome(self, draft_id: int, outcome_ref: str, outcome_preview: str) -> None:
+        self._conn.execute(
+            "UPDATE draft SET outcome_ref = ?, outcome_preview = ?, updated_at = ? WHERE id = ?",
+            (outcome_ref, outcome_preview, _now(), draft_id),
+        )
+
     def set_draft_status(
         self,
         draft_id: int,

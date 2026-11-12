@@ -359,3 +359,42 @@ def test_learned_bulk_sender_is_triaged_by_rule(flow_env, monkeypatch):
     t = env.store.triage_for(row["id"])
     assert (t["category"], t["decided_by"], t["reason"]) == ("bulk", "rule", "learned bulk sender")
     assert calls(env, "triage") == [] and env.store.pending_draft_for(row["conversation_id"]) is None
+
+
+def one_candidate_draft(env, text="Friday works."):
+    env.llm.responses["reply_draft"] = json.dumps(
+        {"candidates": [{"text": text, "rationale": "r"}], "lookup": ""}
+    )
+    env.arrive("100")
+    d = env.store.drafts()[0]
+    # drafts are stamped with the wall clock; the fixture's mail is dated in 2023
+    env.store._conn.execute("UPDATE draft SET created_at = 1700000100 WHERE id = ?", (d["id"],))
+    return d["id"]
+
+
+def test_sent_mail_that_only_starts_with_the_draft_is_edited(flow_env):
+    env = flow_env
+    one_candidate_draft(env)
+    owner_reply(env, "200", "Friday works. " + "Also, something else entirely. " * 10, "<m100@x>")
+    d = env.store.drafts(status=None)[0]
+    assert (d["status"], d["final_text"]) == ("edited", None)
+
+
+def test_short_addition_still_counts_as_approved(flow_env):
+    env = flow_env
+    one_candidate_draft(env)
+    owner_reply(env, "200", "Friday works. See you!", "<m100@x>")
+    d = env.store.drafts(status=None)[0]
+    assert (d["status"], d["final_text"]) == ("approved", "Friday works.")
+
+
+def test_sent_mail_after_ui_approval_records_the_outcome(flow_env):
+    env = flow_env
+    draft_id = one_candidate_draft(env)
+    env.flow.resolve(draft_id, "approve")
+    sent = owner_reply(env, "200", "Friday works.", "<m100@x>")
+    d = env.store.draft(draft_id)
+    assert d["status"] == "approved"
+    assert d["outcome_ref"] == sent["ref_key"]
+    assert d["outcome_preview"] == "Friday works."
+    assert "draft_outcome" in kinds(env)

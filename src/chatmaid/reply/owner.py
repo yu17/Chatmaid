@@ -10,6 +10,10 @@ from chatmaid.model import NormalizedMessage, make_preview
 from chatmaid.quoting import strip_quoted, strip_reply_chrome
 
 
+APPROVE_SLACK_CHARS = 200  # a sign-off or a line added to an approved draft
+APPROVE_SLACK_RATIO = 0.2
+
+
 def _norm(text: str) -> str:
     return " ".join(text.split())
 
@@ -20,11 +24,12 @@ class OwnerMixin:
         pending = store.pending_draft_for(conversation_id)
         if pending is not None:
             sent = _norm(strip_reply_chrome(msg.text))
-            matches = [
-                v["text"]
-                for v in store.draft_versions(pending["id"])
-                if _norm(v["text"]) and sent.startswith(_norm(v["text"]))  # equal or extended
-            ]
+            matches = []
+            for v in store.draft_versions(pending["id"]):
+                text = _norm(v["text"])
+                slack = max(APPROVE_SLACK_CHARS, APPROVE_SLACK_RATIO * len(text))
+                if text and sent.startswith(text) and len(sent) - len(text) <= slack:
+                    matches.append(v["text"])
             match = max(matches, key=lambda t: len(_norm(t))) if matches else None
             status = "approved" if match is not None else "edited"
             with store.transaction():
@@ -36,6 +41,16 @@ class OwnerMixin:
                     "reply", "draft_resolved", msg.ref.key(),
                     {"draft_id": pending["id"], "status": status},
                 )
+        else:
+            resolved = store.unmatched_resolved_draft(conversation_id, before=msg.sent_at)
+            if resolved is not None:  # approved or edited in the UI; the mail went out later
+                with store.transaction():
+                    store.set_draft_outcome(
+                        resolved["id"], msg.ref.key(), make_preview(msg.text)
+                    )
+                    store.log_event(
+                        "reply", "draft_outcome", msg.ref.key(), {"draft_id": resolved["id"]}
+                    )
         self.update_summary(conversation_id, msg)
 
     def update_summary(self, conversation_id: int, msg: NormalizedMessage) -> bool:
