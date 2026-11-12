@@ -92,7 +92,7 @@ def test_cli_approve_edit_dismiss(cli_draft_env, capsys):
 
 
 def test_cli_cloud_propose_non_tty_then_send(cli_draft_env, capsys, monkeypatch):
-    monkeypatch.setattr("chatmaid.cli.make_backend", lambda cfg, name: FakeCloud(name="codex", model="m"))
+    monkeypatch.setattr("chatmaid.cli.common.make_backend", lambda cfg, name: FakeCloud(name="codex", model="m"))
     make_draft(cli_draft_env)
     capsys.readouterr()
     assert run(cli_draft_env, "draft", "cloud", "1", "--fake-llm") == 0
@@ -108,7 +108,7 @@ def test_cli_cloud_propose_non_tty_then_send(cli_draft_env, capsys, monkeypatch)
 
 
 def test_cli_cloud_decline(cli_draft_env, capsys, monkeypatch):
-    monkeypatch.setattr("chatmaid.cli.make_backend", lambda cfg, name: FakeCloud(name="codex", model="m"))
+    monkeypatch.setattr("chatmaid.cli.common.make_backend", lambda cfg, name: FakeCloud(name="codex", model="m"))
     make_draft(cli_draft_env)
     run(cli_draft_env, "draft", "cloud", "1", "--fake-llm")
     capsys.readouterr()
@@ -139,7 +139,7 @@ def test_cli_draft_run_message_gone_from_cache(cli_draft_env, capsys, monkeypatc
 @pytest.mark.parametrize("error", [EOFError, KeyboardInterrupt])
 def test_cli_cloud_prompt_eof_or_interrupt_declines(cli_draft_env, capsys, monkeypatch, error):
     backend = FakeCloud(name="codex", model="m")
-    monkeypatch.setattr("chatmaid.cli.make_backend", lambda cfg, name: backend)
+    monkeypatch.setattr("chatmaid.cli.common.make_backend", lambda cfg, name: backend)
     make_draft(cli_draft_env)
     capsys.readouterr()
 

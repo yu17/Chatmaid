@@ -120,7 +120,7 @@ def test_registry_default_is_codex_with_configured_model(fake_env):
 
 def test_cli_cloud_check_prints_fields(fake_env, monkeypatch, capsys):
     fake = FakeCloud(name="codex", model="gpt-x")
-    monkeypatch.setattr("chatmaid.cli.make_backend", lambda cfg, name=None: fake)
+    monkeypatch.setattr("chatmaid.cli.common.make_backend", lambda cfg, name=None: fake)
     assert main(["--config", str(fake_env.config_path), "cloud-check"]) == 0
     out = capsys.readouterr().out
     assert "backend=codex model=gpt-x" in out
@@ -130,6 +130,6 @@ def test_cli_cloud_check_prints_fields(fake_env, monkeypatch, capsys):
 
 def test_cli_cloud_check_error_exits_1(fake_env, monkeypatch, capsys):
     fake = FakeCloud(response=CloudError("nope"))
-    monkeypatch.setattr("chatmaid.cli.make_backend", lambda cfg, name=None: fake)
+    monkeypatch.setattr("chatmaid.cli.common.make_backend", lambda cfg, name=None: fake)
     assert main(["--config", str(fake_env.config_path), "cloud-check"]) == 1
     assert "nope" in capsys.readouterr().err

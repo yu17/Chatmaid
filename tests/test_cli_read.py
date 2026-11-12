@@ -87,18 +87,20 @@ def test_cli_init_model_pass_without_token_fails_cleanly(fake_env, capsys):
 
 
 def test_cli_init_reports_llm_error(fake_env, monkeypatch, capsys):
-    import chatmaid.cli as cli
+    import chatmaid.cli.common as cli_common
+    import chatmaid.init.pipeline as pipeline
 
     def broken(self, opts):
         raise LLMError("embedding model returned garbage")
 
-    monkeypatch.setattr(cli.InitPipeline, "run", broken)
+    monkeypatch.setattr(pipeline.InitPipeline, "run", broken)
     assert main(["--config", str(fake_env.config_path), "init", "--pass", "embed", "--fake-llm"]) == 1
     assert "embedding model returned garbage" in capsys.readouterr().err
 
 
 def test_cli_llm_check_builds_client_from_config(fake_env, monkeypatch, capsys):
-    import chatmaid.cli as cli
+    import chatmaid.cli.common as cli_common
+    import chatmaid.init.pipeline as pipeline
 
     fake_env.config.lmstudio.token_file.write_text("tok\n")
     captured = {}
@@ -115,7 +117,7 @@ def test_cli_llm_check_builds_client_from_config(fake_env, monkeypatch, capsys):
             captured.update(kw)
             return "OK"
 
-    monkeypatch.setattr(cli, "LMStudioClient", Stub)
+    monkeypatch.setattr(cli_common, "LMStudioClient", Stub)
     assert main(["--config", str(fake_env.config_path), "llm-check"]) == 0
     assert "reply: OK" in capsys.readouterr().out
     assert captured["model"] == fake_env.config.lmstudio.model
@@ -131,14 +133,14 @@ def test_cli_init_stopped_exits_130(fake_env, monkeypatch, capsys):
         self.stopped = True
         return DigestStats(0, 0, 0, 0, 0, stopped=True)
 
-    monkeypatch.setattr("chatmaid.cli.InitPipeline.digest", stopped_digest)
+    monkeypatch.setattr("chatmaid.init.pipeline.InitPipeline.digest", stopped_digest)
     rc = main(["--config", str(fake_env.config_path), "init", "--pass", "digest", "--fake-llm"])
     assert rc == 130 and "stopped; run the same command to resume" in capsys.readouterr().err
 
 
 def test_cli_lookup_vector_and_category(cli_env, capsys, monkeypatch):
-    monkeypatch.setattr("chatmaid.cli._lmstudio_client", lambda cfg, token: FakeLLM(dim=4))
-    monkeypatch.setattr("chatmaid.cli.read_token", lambda cfg: "t")
+    monkeypatch.setattr("chatmaid.cli.common.lmstudio_client", lambda cfg, token: FakeLLM(dim=4))
+    monkeypatch.setattr("chatmaid.cli.common.read_token", lambda cfg: "t")
     cfg = ["--config", str(cli_env.config_path)]
     assert main([*cfg, "lookup", "S1"]) == 0 and "conversation" in capsys.readouterr().out
     assert main([*cfg, "lookup", "hello", "--no-vector", "--category", "event"]) == 0 and capsys.readouterr().out == ""
@@ -166,7 +168,7 @@ def test_cli_lookup_without_token_falls_back_to_full_text(cli_env, capsys, monke
     def no_token(cfg):
         raise ConfigError("no token")
 
-    monkeypatch.setattr("chatmaid.cli.read_token", no_token)
+    monkeypatch.setattr("chatmaid.cli.common.read_token", no_token)
     cfg = ["--config", str(cli_env.config_path)]
     assert main([*cfg, "lookup", "hello"]) == 0
     captured = capsys.readouterr()
