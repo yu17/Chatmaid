@@ -3,6 +3,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+import markupsafe
 import pytest
 from fastapi import Depends
 from fastapi.testclient import TestClient
@@ -512,6 +513,7 @@ def test_cloud_flow_shows_payload_before_send_and_nothing_is_sent_until_send(web
     assert f"/cloud/{call_id}" in web_env.client.get(f"/drafts/{did}").text
     page = web_env.client.get(f"/cloud/{call_id}").text
     assert "Send this to claude" in page and "Decline" in page and "<pre" in page
+    assert str(markupsafe.escape(call["payload"])) in page
     assert "more &lt;b&gt;formal&lt;/b&gt;" in page
     assert "mapping" not in page.lower()
     assert all(f.prompts == [] for f in fakes)
@@ -585,6 +587,7 @@ def test_status_page_shows_counts_failures_and_untriaged(web_env):
 
 
 def test_retry_button_triages_an_untriaged_message(web_env):
+    web_env.app.state.now = lambda: 1_700_001_000  # the fixtures' clock
     row = untriaged(web_env, "702", date=1_700_000_900)
     assert post(web_env, f"/status/retry/{row['id']}").status_code == 303
     (job,) = web_env.app.state.jobs.for_subject("retry", row["id"])
@@ -611,6 +614,7 @@ def test_retry_that_fails_again_shows_as_failed_and_lists_the_error(web_env):
 
 
 def test_retry_of_a_message_gone_from_the_mail_store_fails_readably(web_env):
+    web_env.app.state.now = lambda: 1_700_001_000  # the fixtures' clock
     row = untriaged(web_env, "703", date=1_700_000_900)
 
     def gone(ref):
@@ -622,3 +626,120 @@ def test_retry_of_a_message_gone_from_the_mail_store_fails_readably(web_env):
     (job,) = web_env.app.state.jobs.for_subject("retry", row["id"])
     done = wait_job(web_env.client, job.id)
     assert done["state"] == "failed" and "mail store" in done["error"]
+
+
+# -- final review fixes -------------------------------------------------------------------
+
+
+def test_search_dates_are_whole_local_days(web_env, monkeypatch):
+    import time
+
+    monkeypatch.setenv("TZ", "Asia/Shanghai")  # UTC+8: a UTC day would be 8 hours off
+    time.tzset()
+    seen = {}
+
+    def fake_search(store, llm, **kw):
+        seen.update(kw)
+        return []
+
+    monkeypatch.setattr(app_module, "search", fake_search)
+    try:
+        r = web_env.client.get(
+            "/search", params={"q": "x", "since": "2023-11-14", "until": "2023-11-14"}
+        )
+        midnight = int(datetime(2023, 11, 14).timestamp())  # local midnight
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()
+    assert r.status_code == 200
+    assert seen["since"] == midnight
+    assert seen["until"] == midnight + 86400  # exclusive: 23:59:59 is inside the day
+    assert seen["since"] <= midnight + 86399 < seen["until"]
+
+
+def test_no_draft_button_on_the_owners_own_message(web_env):
+    row = web_env.arrive(
+        "520", sender="me@x.org", to="ann@x.org", folder="[Gmail]/Sent Mail", body="Hi Ann"
+    )
+    assert row["is_owner"] == 1
+    page = web_env.client.get(f"/messages/{row['id']}").text
+    assert f"/messages/{row['id']}/draft" not in page and "Draft a reply" not in page
+    other = web_env.arrive("521", subject="from Ann", message_id="<a521@x>")
+    web_env.store.set_draft_status(draft_of(web_env, other)["id"], "dismissed")
+    assert "Draft a reply" in web_env.client.get(f"/messages/{other['id']}").text
+
+
+def test_retry_accepts_only_a_message_waiting_for_triage(web_env):
+    web_env.app.state.now = lambda: 1_700_001_000  # the fixtures' clock
+    triaged = web_env.arrive("530")
+    assert web_env.store.triage_for(triaged["id"]) is not None
+    r = post(web_env, f"/status/retry/{triaged['id']}")
+    assert r.status_code == 303 and r.headers["location"] == "/status?flash=not_untriaged"
+    assert web_env.app.state.jobs.for_subject("retry", triaged["id"]) == []
+    page = web_env.client.get(r.headers["location"]).text
+    assert "That message is not waiting for triage." in page
+    waiting = untriaged(web_env, "531", date=1_700_000_900, subject="s531", message_id="<a531@x>")
+    assert post(web_env, f"/status/retry/{waiting['id']}").headers["location"] == "/status"
+    assert len(web_env.app.state.jobs.for_subject("retry", waiting["id"])) == 1
+    (job,) = web_env.app.state.jobs.for_subject("retry", waiting["id"])
+    wait_job(web_env.client, job.id)
+
+
+def test_bad_request_and_stale_csrf_render_the_error_page(web_env):
+    r = web_env.client.get("/", params={"filter": "bogus"})
+    assert r.status_code == 400 and "<html" in r.text and "unknown filter" in r.text
+    assert r.headers["content-security-policy"].startswith("default-src 'self'")
+    row = web_env.arrive("540")
+    did = draft_of(web_env, row)["id"]
+    r = web_env.client.post(f"/drafts/{did}/dismiss", data={"csrf": "stale"}, follow_redirects=False)
+    assert r.status_code == 403 and "<html" in r.text and "reload" in r.text.lower()
+    assert r.headers["x-frame-options"] == "DENY"
+    assert web_env.store.draft(did)["status"] == "pending"
+
+
+def test_send_job_runs_without_an_lm_studio_token(web_env):
+    row = web_env.arrive("550")
+    did = draft_of(web_env, row)["id"]
+    call_id = propose(web_env, did)
+
+    def no_token():
+        raise ConfigError("no token")
+
+    web_env.services.make_llm = no_token
+    assert post(web_env, f"/cloud/{call_id}/send").status_code == 303
+    (job,) = web_env.app.state.jobs.for_subject("send", call_id)
+    assert wait_job(web_env.client, job.id)["state"] == "done"
+    assert web_env.store.cloud_call(call_id)["status"] == "sent"
+
+
+def test_flow_without_a_model_raises_llm_error_on_a_model_call(web_env):
+    with web_env.services.session() as (store, connector):
+        flow = web_env.services.flow(store, connector, model=False)
+        with pytest.raises(LLMError):
+            flow.llm.complete(system="s", user="u", model="m")
+        with pytest.raises(LLMError):
+            flow.llm.embed(["x"], model="m")
+
+
+def test_serve_labels_only_a_bind_failure_as_cannot_listen(web_env, monkeypatch, capsys):
+    from chatmaid.web import serve as serve_module
+    from chatmaid.web.services import Services
+
+    monkeypatch.setattr(Services, "from_config", classmethod(lambda cls, cfg: web_env.services))
+
+    def in_use(hosts, port):
+        raise OSError("address in use")
+
+    monkeypatch.setattr(serve_module, "bind_sockets", in_use)
+    assert main(["--config", str(web_env.config_path), "serve"]) == 1
+    assert "cannot listen: address in use" in capsys.readouterr().err
+
+    monkeypatch.setattr(serve_module, "bind_sockets", lambda hosts, port: [])
+
+    def runtime_failure(self, sockets=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(serve_module.uvicorn.Server, "run", runtime_failure)
+    with pytest.raises(OSError, match="disk full"):
+        main(["--config", str(web_env.config_path), "serve"])
+    assert "cannot listen" not in capsys.readouterr().err

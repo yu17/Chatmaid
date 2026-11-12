@@ -12,7 +12,7 @@ from chatmaid.connectors.base import Connector
 from chatmaid.connectors.evolution.connector import EvolutionConnector
 from chatmaid.connectors.evolution.sources import MissingAccount, load_accounts
 from chatmaid.identity import OwnerIdentity
-from chatmaid.llm.base import LLM
+from chatmaid.llm.base import LLM, NoLLM
 from chatmaid.reply.flow import ReplyFlow
 from chatmaid.store import Store
 
@@ -54,6 +54,9 @@ class Services:
             store.close()
 
     def flow(self, store: Store, connector: Connector, *, model: bool = True) -> ReplyFlow:
-        """A reply flow; model=False for actions that never call the model (no token needed)."""
-        llm = self.make_llm() if model else None
+        """A reply flow; model=False for actions that never call the model (no token needed).
+
+        Without a model the flow gets a NoLLM, so a stray model call is an LLMError.
+        """
+        llm = self.make_llm() if model else NoLLM()
         return ReplyFlow(store, connector, llm, self.cfg, backend_factory=self.make_backend)

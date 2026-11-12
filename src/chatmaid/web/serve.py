@@ -27,9 +27,16 @@ def bind_sockets(hosts: Iterable[str], port: int) -> list[socket.socket]:
     return socks
 
 
+class CannotListen(Exception):
+    """Binding a configured address failed."""
+
+
 def run(services: Services) -> None:
     web = services.cfg.web
-    socks = bind_sockets(web.hosts, web.port)
+    try:
+        socks = bind_sockets(web.hosts, web.port)
+    except OSError as e:
+        raise CannotListen(str(e)) from e
     for host, s in zip(web.hosts, socks):
         shown = f"[{host}]" if ":" in host else host
         print(f"serving on http://{shown}:{s.getsockname()[1]}{web.base_path}/", flush=True)

@@ -7,7 +7,7 @@ from chatmaid.config import ConfigError, read_token  # noqa: F401  (re-exported;
 from chatmaid.connectors.evolution.connector import EvolutionConnector
 from chatmaid.connectors.evolution.sources import MissingAccount, load_accounts
 from chatmaid.identity import OwnerIdentity
-from chatmaid.llm.base import LLMError
+from chatmaid.llm.base import NoLLM  # noqa: F401  (re-exported for the commands)
 from chatmaid.llm.fake import CANNED, FakeLLM
 from chatmaid.llm.lmstudio import LMStudioClient
 from chatmaid.reply.flow import ReplyFlow
@@ -27,17 +27,6 @@ def parse_since(text: str) -> int:
 def open_store(cfg) -> Store:
     cfg.data.dir.mkdir(parents=True, exist_ok=True)
     return Store(cfg.index_path, embedding_dim=cfg.lmstudio.embedding_dim)
-
-
-class NoLLM:
-    """Stands in when no requested pass talks to a model (ingest only): no token is needed."""
-
-    def complete(self, **_) -> str:
-        raise LLMError("this run was started without an LM Studio client")
-
-    def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
-        raise LLMError("this run was started without an LM Studio client")
-
 
 
 def day(ts: int | None) -> str:

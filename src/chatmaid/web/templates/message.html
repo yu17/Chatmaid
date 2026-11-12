@@ -33,6 +33,8 @@
   {% include "_jobs.html" %}
   {% if draft %}
   <p>A draft is pending: <a href="{{ base }}/drafts/{{ draft.id }}">open draft #{{ draft.id }}</a></p>
+  {% elif own %}
+  <p class="meta">This is your own message.</p>
   {% elif not jobs | selectattr("state", "in", ["queued", "running"]) | list %}
   <form action="{{ base }}/messages/{{ msg.message_id }}/draft" method="post">
     <input type="hidden" name="csrf" value="{{ csrf }}">

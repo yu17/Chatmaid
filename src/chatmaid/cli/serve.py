@@ -10,7 +10,7 @@ from chatmaid.config import load as load_config
 
 
 def _serve_command(args: argparse.Namespace) -> int:
-    from chatmaid.web.serve import run
+    from chatmaid.web.serve import CannotListen, run
     from chatmaid.web.services import Services
 
     if args.port is not None and not 1 <= args.port <= 65535:
@@ -26,7 +26,7 @@ def _serve_command(args: argparse.Namespace) -> int:
     except ConfigError as e:
         print(str(e), file=sys.stderr)
         return 1
-    except OSError as e:
+    except CannotListen as e:
         print(f"cannot listen: {e}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

@@ -26,7 +26,9 @@ def stub_services():
         finally:
             closed.append(1)
 
-    return SimpleNamespace(session=session, flow=lambda s, c: f"flow({s},{c})"), closed
+    return SimpleNamespace(
+        session=session, flow=lambda s, c, model=True: f"flow({s},{c},model={model})"
+    ), closed
 
 
 def raises(message):
@@ -83,3 +85,17 @@ def test_stop_does_not_start_a_queued_job():
     gate.set()
     stopper.join(6)
     assert started == [] and runner.get(queued.id).state == "queued"
+
+
+def test_a_job_can_ask_for_a_flow_without_the_model():
+    services, _ = stub_services()
+    runner = JobRunner(services)
+    try:
+        seen = []
+        with_model = runner.submit("draft", "Drafting", 1, lambda flow: seen.append(flow))
+        without = runner.submit("send", "Sending", 2, lambda flow: seen.append(flow), model=False)
+        wait_for(lambda: runner.get(without.id).state, lambda s: s == "done")
+        assert runner.get(with_model.id).state == "done"
+        assert seen == ["flow(store,connector,model=True)", "flow(store,connector,model=False)"]
+    finally:
+        runner.stop()

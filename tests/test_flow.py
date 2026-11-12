@@ -627,3 +627,12 @@ def test_draft_for_message_rejects_owner_messages(flow_env):
         env.flow.draft_for_message(own["id"])
     with pytest.raises(ValueError):
         env.flow.draft_for_message(99999)
+
+
+def test_no_llm_is_shared_by_the_cli_and_the_web():
+    from chatmaid.cli import common
+    from chatmaid.llm.base import LLMError, NoLLM
+
+    assert common.NoLLM is NoLLM
+    with pytest.raises(LLMError):
+        NoLLM().complete(system="s", user="u", model="m")

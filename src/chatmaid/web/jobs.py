@@ -37,7 +37,9 @@ class JobRunner:
     def __init__(self, services: Services) -> None:
         self._services = services
         self._jobs: dict[str, Job] = {}  # insertion order is submission order
-        self._fns: queue.Queue[tuple[str, Callable[[ReplyFlow], int | None]] | None] = queue.Queue()
+        self._fns: queue.Queue[tuple[str, Callable[[ReplyFlow], int | None], bool] | None] = (
+            queue.Queue()
+        )
         self._lock = threading.Lock()
         self._ids = itertools.count(1)
         self._token = secrets.token_hex(3)  # an old page cannot match a new process's job
@@ -46,14 +48,21 @@ class JobRunner:
         self._worker.start()
 
     def submit(
-        self, kind: str, label: str, subject_id: int, fn: Callable[[ReplyFlow], int | None]
+        self,
+        kind: str,
+        label: str,
+        subject_id: int,
+        fn: Callable[[ReplyFlow], int | None],
+        *,
+        model: bool = True,
     ) -> Job:
+        """Queue fn(flow); model=False for a job that never calls the local model."""
         with self._lock:
             job = Job(
                 f"{self._token}-{next(self._ids)}", kind, label, subject_id, "queued", None, None, time.time()
             )
             self._jobs[job.id] = job
-        self._fns.put((job.id, fn))
+        self._fns.put((job.id, fn, model))
         return job
 
     def get(self, job_id: str) -> Job | None:
@@ -88,13 +97,13 @@ class JobRunner:
 
     def _run(self) -> None:
         while (item := self._fns.get()) is not None:
-            job_id, fn = item
+            job_id, fn, model = item
             if self._stopping.is_set():
                 break
             self._update(job_id, state="running")
             try:
                 with self._services.session() as (store, connector):
-                    result = fn(self._services.flow(store, connector))
+                    result = fn(self._services.flow(store, connector, model=model))
                 self._update(job_id, state="done", result=result)
             except Exception as e:  # the worker must outlive any single job
                 log.warning("job %s failed: %s", job_id, e, exc_info=not isinstance(e, EXPECTED_FAILURES))

@@ -478,8 +478,12 @@ class Store:
 
     @contextlib.contextmanager
     def transaction(self) -> Iterator[None]:
-        """All-or-nothing group of writes on the autocommit connection."""
-        self._conn.execute("BEGIN")
+        """All-or-nothing group of writes on the autocommit connection.
+
+        IMMEDIATE takes the write lock up front, so a block that reads before it writes waits
+        on the busy timeout while watch commits instead of failing with SQLITE_BUSY_SNAPSHOT.
+        """
+        self._conn.execute("BEGIN IMMEDIATE")
         try:
             yield
         except BaseException:

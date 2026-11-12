@@ -115,6 +115,11 @@ def conversation_view(
 _FAILURE_KINDS = ("error", "draft_failed", "owner_failed")
 
 
+def untriaged_list(store, *, max_age_days: int, now: int) -> list:
+    """The Status page's "waiting for triage" list: no retry backoff, so all of them show."""
+    return store.untriaged_incoming(since=now - max_age_days * 86400)
+
+
 def status_view(store, *, max_age_days: int, now: int | None = None) -> dict:
     now = int(time.time()) if now is None else now
     return {
@@ -124,5 +129,5 @@ def status_view(store, *, max_age_days: int, now: int | None = None) -> dict:
         "categories": store.category_counts(),
         "recent_events": store.events(limit=50),
         "failures": store.events(limit=50, kinds=_FAILURE_KINDS),
-        "untriaged": store.untriaged_incoming(since=now - max_age_days * 86400),
+        "untriaged": untriaged_list(store, max_age_days=max_age_days, now=now),
     }

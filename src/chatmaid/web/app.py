@@ -16,13 +16,19 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from chatmaid.cli.common import parse_since
 from chatmaid.config import ConfigError
 from chatmaid.init.categories import CATEGORIES
 from chatmaid.llm.base import LLMError
 from chatmaid.lookup import related, search
 from chatmaid.model import SourceRef
-from chatmaid.views import account_labels, conversation_view, inbox, message_view, status_view
+from chatmaid.views import (
+    account_labels,
+    conversation_view,
+    inbox,
+    message_view,
+    status_view,
+    untriaged_list,
+)
 from chatmaid.web.jobs import JobRunner
 from chatmaid.web.services import Services
 
@@ -42,6 +48,13 @@ SECURITY_HEADERS = {
 CLOUD_BACKENDS = ("codex", "claude")
 CLOUD_LIST_LIMIT = 200
 INBOX_FILTERS = ("default", "needs_reply", "drafts", "all", *CATEGORIES)
+# Statuses shown as an HTML page; None shows the exception's own (fixed, server-side) detail.
+ERROR_TEXTS = {
+    400: None,
+    403: "This form has expired, probably because the server restarted. "
+         "Go back, reload the page and try again.",
+    404: "Not found.",
+}
 # Every POST redirects (303) to a GET page; a notice travels as one of these keys, never as
 # text from the URL.
 FLASHES = {
@@ -72,6 +85,11 @@ templates = Jinja2Templates(
     context_processors=[_context],
 )
 templates.env.filters["when"] = _when
+
+
+def local_day(text: str) -> int:
+    """Local midnight starting a YYYY-MM-DD day: pages show local time, so filters use it too."""
+    return int(datetime.strptime(text, "%Y-%m-%d").timestamp())
 
 
 def host_of(header: str) -> str:
@@ -135,10 +153,12 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
 
     @app.exception_handler(StarletteHTTPException)
     async def error_page(request: Request, exc: StarletteHTTPException):
-        if exc.status_code != 404:
+        if exc.status_code not in ERROR_TEXTS:
             return await http_exception_handler(request, exc)
+        detail = ERROR_TEXTS[exc.status_code] or str(exc.detail)
         return templates.TemplateResponse(
-            request, "error.html", {"status": 404, "detail": "Not found."}, status_code=404
+            request, "error.html", {"status": exc.status_code, "detail": detail},
+            status_code=exc.status_code, headers=getattr(exc, "headers", None),
         )
 
     def model_or_none():
@@ -167,7 +187,8 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
             except KeyError:
                 raise HTTPException(status_code=404, detail="no such message") from None
             conv = conversation_view(store, msg.conversation_id, limit=PAGE_SIZE)
-            account = SourceRef.from_key(store.message(message_id)["ref_key"]).account
+            row = store.message(message_id)
+            account = SourceRef.from_key(row["ref_key"]).account
             account = account_labels(connector).get(account, account)
             draft = store.pending_draft_for(msg.conversation_id)
             jobs = request.app.state.jobs.for_subject("draft", message_id)
@@ -180,6 +201,7 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
             return templates.TemplateResponse(
                 request, "message.html",
                 {"msg": msg, "conv": conv, "account": account, "draft": draft, "hits": hits,
+                 "own": bool(row["is_owner"]),
                  "notice": notice, "previews": previews_of(store, conv), "jobs": jobs},
             )
 
@@ -202,8 +224,8 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
         if any(c not in CATEGORIES for c in category):
             raise HTTPException(status_code=400, detail="unknown category")
         try:
-            since_ts = parse_since(since) if since else None
-            until_ts = parse_since(until) + 86399 if until else None  # the whole day
+            since_ts = local_day(since) if since else None
+            until_ts = local_day(until) + 86400 if until else None  # exclusive: the whole day
         except ValueError:
             raise HTTPException(status_code=400, detail="dates are YYYY-MM-DD") from None
         hits, notice = [], None
@@ -390,7 +412,8 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
         if request.app.state.jobs.busy("send", call_id):
             return redirect(request, f"/cloud/{call_id}")  # already queued; the page shows it
         request.app.state.jobs.submit(
-            "send", f"Sending to {call['backend']}", call_id, lambda flow: flow.send_cloud(call_id)
+            "send", f"Sending to {call['backend']}", call_id, lambda flow: flow.send_cloud(call_id),
+            model=False,  # the send needs no local model, so no LM Studio token either
         )
         return redirect(request, f"/cloud/{call_id}")
 
@@ -457,8 +480,15 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
     def retry_message(request: Request, message_id: int):
         with services.session() as (store, _connector):
             row = store.message(message_id)
+            listed = {
+                r["id"] for r in untriaged_list(
+                    store, max_age_days=cfg.draft.max_age_days, now=int(request.app.state.now())
+                )
+            }
         if row is None:
             raise HTTPException(status_code=404, detail="no such message")
+        if message_id not in listed:
+            return redirect(request, "/status", "not_untriaged")
         if not request.app.state.jobs.busy("retry", message_id):
             request.app.state.jobs.submit(
                 "retry", f"Retrying message {message_id}", message_id,

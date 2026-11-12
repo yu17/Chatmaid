@@ -18,3 +18,13 @@ class LLM(Protocol):
     ) -> str: ...
 
     def embed(self, texts: list[str], *, model: str) -> list[list[float]]: ...
+
+
+class NoLLM:
+    """Stands in when no model is needed (no token): any model call raises LLMError."""
+
+    def complete(self, **_) -> str:
+        raise LLMError("this run was started without an LM Studio client")
+
+    def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
+        raise LLMError("this run was started without an LM Studio client")

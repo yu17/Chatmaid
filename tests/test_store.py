@@ -342,3 +342,20 @@ def test_v4_upgrade_backfills_the_full_text_index(tmp_path):
         assert [cid for cid, _ in hits] == [1] and "[appointment]" in hits[0][1]
     finally:
         s.close()
+
+
+def test_transaction_takes_the_write_lock_at_once(tmp_path):
+    s = Store(tmp_path / "i.sqlite", embedding_dim=4)
+    other = sqlite3.connect(tmp_path / "i.sqlite", timeout=0, isolation_level=None)
+    try:
+        with s.transaction():
+            s.events(limit=1)
+            # a read-then-write block holds the lock from its first statement, so a concurrent
+            # writer waits instead of invalidating the read snapshot (SQLITE_BUSY_SNAPSHOT)
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                other.execute("BEGIN IMMEDIATE")
+        other.execute("BEGIN IMMEDIATE")
+        other.execute("ROLLBACK")
+    finally:
+        other.close()
+        s.close()
