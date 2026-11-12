@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Cloud call #{{ call.id }} - chatmaid{% endblock %}
+{% block content %}
+<h1>Cloud call #{{ call.id }} <span class="tag">{{ call.status }}</span></h1>
+<p>For <a href="{{ base }}/drafts/{{ call.draft_id }}">draft #{{ call.draft_id }}</a>, backend {{ call.backend }}, model {{ call.model }}.
+Created {{ call.created_at | when }}; consented {{ call.consented_at | when }}; finished {{ call.finished_at | when }}.</p>
+{% include "_jobs.html" %}
+{% if call.error %}<p class="notice">Error: {{ call.error }}</p>{% endif %}
+{% if call.comment %}<p class="meta">Your comment: {{ call.comment }}</p>{% endif %}
+
+<h2>Exact payload</h2>
+{% if call.status == "proposed" %}
+<p class="meta">This is exactly what would be sent, with names and addresses replaced by placeholders.</p>
+{% endif %}
+<pre class="mail" id="payload">{{ call.payload }}</pre>
+
+{% if call.status == "proposed" %}
+<div class="actions">
+  <form action="{{ base }}/cloud/{{ call.id }}/send" method="post">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit">Send this to {{ call.backend }}</button>
+  </form>
+  <form action="{{ base }}/cloud/{{ call.id }}/decline" method="post">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit">Decline</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Cloud calls - chatmaid{% endblock %}
+{% block content %}
+<h1>Cloud calls</h1>
+{% if calls %}
+<table>
+  <thead><tr><th>Call</th><th>Draft</th><th>Backend</th><th>Status</th><th>Created</th><th>Consented</th><th>Error</th></tr></thead>
+  <tbody>
+  {% for c in calls %}
+  <tr>
+    <td><a href="{{ base }}/cloud/{{ c.id }}">#{{ c.id }}</a></td>
+    <td><a href="{{ base }}/drafts/{{ c.draft_id }}">#{{ c.draft_id }}</a></td>
+    <td>{{ c.backend }}</td>
+    <td>{{ c.status }}</td>
+    <td>{{ c.created_at | when }}</td>
+    <td>{{ c.consented_at | when }}</td>
+    <td>{{ c.error or "" }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">No cloud calls yet.</p>
+{% endif %}
+{% endblock %}

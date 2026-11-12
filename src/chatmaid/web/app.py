@@ -35,6 +35,8 @@ SECURITY_HEADERS = {
         "default-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'"
     ),
 }
+CLOUD_BACKENDS = ("codex", "claude")
+CLOUD_LIST_LIMIT = 200
 INBOX_FILTERS = ("default", "needs_reply", "drafts", "all", *CATEGORIES)
 
 
@@ -238,7 +240,13 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
             return templates.TemplateResponse(
                 request, "draft.html",
                 {"draft": draft, "msg": msg, "current": current, "earlier": earlier,
-                 "jobs": request.app.state.jobs.for_subject("regenerate", draft_id),
+                 "jobs": request.app.state.jobs.for_subject("regenerate", draft_id)
+                 + request.app.state.jobs.for_subject("propose", draft_id),
+                 "proposals": [
+                     c for c in store.cloud_calls(limit=CLOUD_LIST_LIMIT)
+                     if c["draft_id"] == draft_id and c["status"] == "proposed"
+                 ],
+                 "backends": CLOUD_BACKENDS, "default_backend": cfg.cloud.default_backend,
                  "flash": flash},
             )
 
@@ -302,6 +310,92 @@ def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
     @app.post("/drafts/{draft_id}/dismiss", dependencies=[Depends(check_csrf)])
     def dismiss_draft(request: Request, draft_id: int):
         return act(request, draft_id, "dismiss")
+
+    @app.post("/drafts/{draft_id}/cloud", dependencies=[Depends(check_csrf)])
+    def propose_improvement(
+        request: Request, draft_id: int, backend: str = Form(""), comment: str = Form(""),
+        from_version: str = Form(""),
+    ):
+        """Queue the proposal: it builds the payload and stores it; nothing leaves the machine."""
+        backend = backend or cfg.cloud.default_backend
+        if backend not in CLOUD_BACKENDS:
+            raise HTTPException(status_code=400, detail="unknown backend")
+        try:
+            version = int(from_version) if from_version else None
+        except ValueError:
+            raise HTTPException(status_code=400, detail="bad version") from None
+        with services.session() as (store, _connector):
+            draft = store.draft(draft_id)
+        if draft is None:
+            raise HTTPException(status_code=404, detail="no such draft")
+        if draft["status"] != "pending":
+            return draft_page_response(
+                request, draft_id, flash=f"draft {draft_id} is {draft['status']}, not pending"
+            )
+        if request.app.state.jobs.busy("propose", draft_id):
+            return draft_page_response(request, draft_id, flash="Already preparing a proposal.")
+        request.app.state.jobs.submit(
+            "propose", "Preparing the cloud payload", draft_id,
+            lambda flow: flow.propose_cloud(
+                draft_id, backend=backend, comment=comment.strip() or None, from_version=version
+            ).call_id,
+        )
+        return redirect(request, f"/drafts/{draft_id}")
+
+    def call_page_response(request: Request, call_id: int, flash: str | None = None):
+        with services.session() as (store, _connector):
+            call = store.cloud_call(call_id)
+            if call is None:
+                raise HTTPException(status_code=404, detail="no such cloud call")
+            # the payload is pseudonymized; the mapping back to real names is never shown
+            return templates.TemplateResponse(
+                request, "cloud_call.html",
+                {"call": call, "jobs": request.app.state.jobs.for_subject("send", call_id),
+                 "flash": flash},
+            )
+
+    @app.get("/cloud")
+    def cloud_page(request: Request):
+        with services.session() as (store, _connector):
+            calls = store.cloud_calls(limit=CLOUD_LIST_LIMIT)
+        return templates.TemplateResponse(request, "cloud.html", {"calls": calls})
+
+    @app.get("/cloud/{call_id}")
+    def cloud_call_page(request: Request, call_id: int):
+        return call_page_response(request, call_id)
+
+    @app.post("/cloud/{call_id}/send", dependencies=[Depends(check_csrf)])
+    def send_call(request: Request, call_id: int):
+        """The owner's consent: send exactly the stored payload."""
+        with services.session() as (store, _connector):
+            call = store.cloud_call(call_id)
+        if call is None:
+            raise HTTPException(status_code=404, detail="no such cloud call")
+        if call["status"] != "proposed":
+            return call_page_response(
+                request, call_id, flash=f"cloud call {call_id} is {call['status']}, not proposed"
+            )
+        if request.app.state.jobs.busy("send", call_id):
+            return redirect(request, f"/cloud/{call_id}")  # already queued; the page shows it
+        request.app.state.jobs.submit(
+            "send", f"Sending to {call['backend']}", call_id, lambda flow: flow.send_cloud(call_id)
+        )
+        return redirect(request, f"/cloud/{call_id}")
+
+    @app.post("/cloud/{call_id}/decline", dependencies=[Depends(check_csrf)])
+    def decline_call(request: Request, call_id: int):
+        with services.session() as (store, connector):
+            if store.cloud_call(call_id) is None:
+                raise HTTPException(status_code=404, detail="no such cloud call")
+            try:
+                services.flow(store, connector, model=False).decline_cloud(call_id)
+            except ValueError as e:
+                error = str(e)
+            else:
+                error = None
+        if error is not None:
+            return call_page_response(request, call_id, flash=error)
+        return redirect(request, f"/cloud/{call_id}")
 
     @app.get("/jobs/{job_id}")
     def job_state(request: Request, job_id: str):

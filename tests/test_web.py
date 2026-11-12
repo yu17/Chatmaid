@@ -450,3 +450,84 @@ def test_resolve_does_not_overwrite_a_draft_settled_meanwhile(web_env):
         web_env.flow._settle(did, "approved", "text")
     assert web_env.store.draft(did)["status"] == "superseded"
     assert web_env.store.draft(did)["final_text"] is None
+
+
+# -- Task 10: cloud improvement with consent and the audit page -------------------------
+
+
+def recording_cloud(web_env, **response):
+    from chatmaid.cloud.fake import FakeCloud
+
+    fakes = []
+
+    def make(name):
+        fake = FakeCloud(name or "codex", "m", response or {"text": "Cloud text.", "rationale": "why"})
+        fakes.append(fake)
+        return fake
+
+    web_env.services.make_backend = make
+    return fakes
+
+
+def propose(web_env, did, **data):
+    r = post(web_env, f"/drafts/{did}/cloud", **data)
+    assert r.status_code == 303
+    job = web_env.app.state.jobs.for_subject("propose", did)[0]
+    done = wait_job(web_env.client, job.id)
+    assert done["state"] == "done", done
+    return done["result"]
+
+
+def test_cloud_flow_shows_payload_before_send_and_nothing_is_sent_until_send(web_env):
+    fakes = recording_cloud(web_env)
+    row = web_env.arrive("600")
+    did = draft_of(web_env, row)["id"]
+    call_id = propose(web_env, did, backend="claude", comment="more <b>formal</b>")
+    call = web_env.store.cloud_call(call_id)
+    assert call["status"] == "proposed" and call["backend"] == "claude"
+    assert all(f.prompts == [] for f in fakes)
+    assert f"/cloud/{call_id}" in web_env.client.get(f"/drafts/{did}").text
+    page = web_env.client.get(f"/cloud/{call_id}").text
+    assert "Send this to claude" in page and "Decline" in page and "<pre" in page
+    assert "more &lt;b&gt;formal&lt;/b&gt;" in page
+    assert "mapping" not in page.lower()
+    assert all(f.prompts == [] for f in fakes)
+    r = post(web_env, f"/cloud/{call_id}/send")
+    assert r.status_code == 303
+    (job,) = web_env.app.state.jobs.for_subject("send", call_id)
+    assert wait_job(web_env.client, job.id)["state"] == "done"
+    assert [f.prompts for f in fakes if f.prompts] == [[call["payload"]]]
+    assert "Cloud text." in web_env.client.get(f"/drafts/{did}").text
+    assert web_env.store.cloud_call(call_id)["status"] == "sent"
+    # a second Send shows the error and sends nothing more
+    again = post(web_env, f"/cloud/{call_id}/send")
+    assert again.status_code == 200 and "not proposed" in again.text
+    assert sum(len(f.prompts) for f in fakes) == 1
+
+
+def test_decline_marks_the_call_declined(web_env):
+    fakes = recording_cloud(web_env)
+    row = web_env.arrive("601")
+    did = draft_of(web_env, row)["id"]
+    call_id = propose(web_env, did)
+    assert web_env.store.cloud_call(call_id)["backend"] == web_env.config.cloud.default_backend
+    r = post(web_env, f"/cloud/{call_id}/decline")
+    assert r.status_code == 303
+    assert web_env.store.cloud_call(call_id)["status"] == "declined"
+    assert all(f.prompts == [] for f in fakes)
+    page = web_env.client.get(f"/cloud/{call_id}").text
+    assert "Send this to" not in page and "declined" in page
+    assert "not proposed" in post(web_env, f"/cloud/{call_id}/decline").text
+
+
+def test_cloud_audit_lists_calls(web_env):
+    recording_cloud(web_env)
+    row = web_env.arrive("602")
+    did = draft_of(web_env, row)["id"]
+    call_id = propose(web_env, did)
+    page = web_env.client.get("/cloud").text
+    assert f"/cloud/{call_id}" in page and f"/drafts/{did}" in page and "proposed" in page
+    assert web_env.client.get("/cloud/9999").status_code == 404
+    assert post(web_env, "/cloud/9999/send").status_code == 404
+    assert post(web_env, "/cloud/9999/decline").status_code == 404
+    assert post(web_env, f"/drafts/{did}/cloud", backend="gpt").status_code == 400

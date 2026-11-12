@@ -64,6 +64,30 @@
   </form>
 </section>
 
+<section class="panel">
+  <h2>Improve with cloud</h2>
+  {% for c in proposals %}
+  <p class="notice">A payload for {{ c.backend }} is ready to review: <a href="{{ base }}/cloud/{{ c.id }}">cloud call #{{ c.id }}</a></p>
+  {% endfor %}
+  <p class="meta">Nothing is sent until you have read the exact payload and pressed Send.</p>
+  <form action="{{ base }}/drafts/{{ draft.id }}/cloud" method="post">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <p><label>Backend
+      <select name="backend">
+        {% for b in backends %}<option value="{{ b }}"{% if b == default_backend %} selected{% endif %}>{{ b }}</option>{% endfor %}
+      </select></label></p>
+    <label>Comment (optional)<br><textarea name="comment" rows="2"></textarea></label>
+    {% if current|length > 1 %}
+    <p><label>Start from
+      <select name="from_version">
+        <option value="">the latest text</option>
+        {% for v in current %}<option value="{{ v.id }}">candidate {{ v.candidate }}</option>{% endfor %}
+      </select></label></p>
+    {% endif %}
+    <p><button type="submit">Prepare payload for review</button></p>
+  </form>
+</section>
+
 <form action="{{ base }}/drafts/{{ draft.id }}/dismiss" method="post">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <button type="submit">Dismiss this draft</button>
