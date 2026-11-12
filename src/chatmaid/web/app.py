@@ -5,17 +5,27 @@ from datetime import datetime
 from pathlib import Path
 
 import jinja2
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from chatmaid.cli.common import parse_since
+from chatmaid.config import ConfigError
 from chatmaid.init.categories import CATEGORIES
-from chatmaid.views import account_labels, inbox
+from chatmaid.llm.base import LLMError
+from chatmaid.lookup import related, search
+from chatmaid.model import SourceRef
+from chatmaid.views import account_labels, conversation_view, inbox, message_view
 from chatmaid.web.services import Services
 
 HERE = Path(__file__).parent
 PAGE_SIZE = 50
+RELATED_LIMIT = 10
+SEARCH_LIMIT = 20
+FULL_TEXT_NOTICE = "full-text only: no LM Studio token"
 # No inline script, style or handlers in templates: the policy forbids them.
 SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
@@ -88,6 +98,94 @@ def create_app(services: Services, *, jobs=None) -> FastAPI:
         return templates.TemplateResponse(
             request, "inbox.html",
             {"rows": rows, "filter": filter, "filters": INBOX_FILTERS, "older": older},
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def error_page(request: Request, exc: StarletteHTTPException):
+        if exc.status_code != 404:
+            return await http_exception_handler(request, exc)
+        return templates.TemplateResponse(
+            request, "error.html", {"status": 404, "detail": "Not found."}, status_code=404
+        )
+
+    def model_or_none():
+        """The model client, or None with the notice to show when there is no token."""
+        try:
+            return services.make_llm(), None
+        except ConfigError:
+            return None, FULL_TEXT_NOTICE
+
+    def with_fallback(run):
+        """run(llm) with the model; on a model failure repeat it full-text only."""
+        llm, notice = model_or_none()
+        try:
+            return run(llm), notice
+        except LLMError as e:
+            return run(None), f"full-text only: the model failed ({e})"
+
+    def previews_of(store, conv):
+        return {r.message_id: store.message(r.message_id)["preview"] or "" for r in conv.messages}
+
+    @app.get("/messages/{message_id}")
+    def message_page(request: Request, message_id: int):
+        with services.session() as (store, connector):
+            try:
+                msg = message_view(store, connector, message_id)
+            except KeyError:
+                raise HTTPException(status_code=404, detail="no such message") from None
+            conv = conversation_view(store, msg.conversation_id, limit=PAGE_SIZE)
+            account = SourceRef.from_key(store.message(message_id)["ref_key"]).account
+            account = account_labels(connector).get(account, account)
+            draft = store.pending_draft_for(msg.conversation_id)
+            hits, notice = with_fallback(
+                lambda llm: related(
+                    store, llm, msg.conversation_id,
+                    embedding_model=cfg.lmstudio.model_embedding, limit=RELATED_LIMIT,
+                )
+            )
+            return templates.TemplateResponse(
+                request, "message.html",
+                {"msg": msg, "conv": conv, "account": account, "draft": draft, "hits": hits,
+                 "notice": notice, "previews": previews_of(store, conv)},
+            )
+
+    @app.get("/conversations/{conversation_id}")
+    def conversation_page(request: Request, conversation_id: int, before: int | None = None):
+        with services.session() as (store, _connector):
+            try:
+                conv = conversation_view(store, conversation_id, before=before, limit=PAGE_SIZE)
+            except KeyError:
+                raise HTTPException(status_code=404, detail="no such conversation") from None
+            return templates.TemplateResponse(
+                request, "conversation.html", {"conv": conv, "previews": previews_of(store, conv)}
+            )
+
+    @app.get("/search")
+    def search_page(
+        request: Request, q: str = "", category: list[str] = Query(default=[]),
+        contact: str = "", since: str = "", until: str = "",
+    ):
+        if any(c not in CATEGORIES for c in category):
+            raise HTTPException(status_code=400, detail="unknown category")
+        try:
+            since_ts = parse_since(since) if since else None
+            until_ts = parse_since(until) + 86399 if until else None  # the whole day
+        except ValueError:
+            raise HTTPException(status_code=400, detail="dates are YYYY-MM-DD") from None
+        hits, notice = [], None
+        if q.strip():
+            with services.session() as (store, _connector):
+                hits, notice = with_fallback(
+                    lambda llm: search(
+                        store, llm, query=q, embedding_model=cfg.lmstudio.model_embedding,
+                        contact=contact or None, since=since_ts, until=until_ts,
+                        categories=tuple(category), limit=SEARCH_LIMIT,
+                    )
+                )
+        return templates.TemplateResponse(
+            request, "search.html",
+            {"q": q, "contact": contact, "since": since, "until": until, "chosen": category,
+             "categories": CATEGORIES, "hits": hits, "notice": notice},
         )
 
     return app

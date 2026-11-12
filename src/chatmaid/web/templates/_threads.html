@@ -1,0 +1,18 @@
+{% if hits %}
+<ul class="rows">
+  {% for t in hits %}
+  <li>
+    <a href="{{ base }}/conversations/{{ t.conversation_id }}">
+      <span class="subject">{{ t.title or "(no subject)" }}</span>
+      <span class="meta">
+        {{ t.last_message_at | when }} &middot; {{ t.message_count }} msg
+        {% if t.category %}<span class="tag">{{ t.category }}</span>{% endif %}
+      </span>
+      {% if t.evidence %}<span class="meta">{{ t.evidence }}</span>{% endif %}
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="empty">Nothing found.</p>
+{% endif %}

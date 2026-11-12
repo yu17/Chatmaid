@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}{{ msg.subject or "Message" }} - chatmaid{% endblock %}
+{% block content %}
+<h1>{{ msg.subject or "(no subject)" }}</h1>
+<dl class="headers">
+  <dt>From</dt><dd>{{ msg.sender }}</dd>
+  <dt>To</dt><dd>{{ msg.recipients | join(", ") or "—" }}</dd>
+  <dt>Date</dt><dd>{{ msg.sent_at | when }}</dd>
+  <dt>Account</dt><dd>{{ account }}</dd>
+  {% if conv.category %}<dt>Category</dt><dd><span class="tag">{{ conv.category }}</span></dd>{% endif %}
+</dl>
+{% if conv.summary %}<p class="summary">{{ conv.summary }}</p>{% endif %}
+
+{% if msg.available %}
+<pre class="mail">{{ msg.own_text }}</pre>
+{% if msg.full_text != msg.own_text %}
+<details>
+  <summary>Full text with quoted history</summary>
+  <pre class="mail">{{ msg.full_text }}</pre>
+</details>
+{% endif %}
+{% if msg.attachments %}
+<p>Attachments:</p>
+<ul>{% for a in msg.attachments %}<li>{{ a }}</li>{% endfor %}</ul>
+{% endif %}
+{% else %}
+<p class="notice">This message is no longer in the mail store; showing the stored preview.</p>
+<pre class="mail">{{ msg.preview }}</pre>
+{% endif %}
+
+<section class="panel">
+  <h2>Reply</h2>
+  {% if draft %}
+  <p>A draft is pending: <a href="{{ base }}/drafts/{{ draft.id }}">open draft #{{ draft.id }}</a></p>
+  {% else %}
+  <form action="{{ base }}/messages/{{ msg.message_id }}/draft" method="post">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit">Draft a reply</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Related</h2>
+  {% if notice %}<p class="notice">{{ notice }}</p>{% endif %}
+  {% include "_threads.html" %}
+</section>
+
+<section class="panel">
+  <h2>Thread</h2>
+  {% include "_thread_list.html" %}
+</section>
+{% endblock %}

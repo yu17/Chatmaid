@@ -25,3 +25,14 @@ input, button, textarea, select { font: inherit; padding: 0.4rem 0.6rem; }
 .flash:empty { display: none; }
 .flash { margin: 0.75rem 0; padding: 0.1rem 0.75rem; border-left: 4px solid #c80; background: #8881; }
 .empty { opacity: 0.7; }
+.headers { display: grid; grid-template-columns: max-content 1fr; gap: 0.1rem 0.75rem; margin: 0.5rem 0; }
+.headers dt { opacity: 0.7; }
+.headers dd { margin: 0; overflow-wrap: anywhere; }
+pre.mail { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; padding: 0.6rem; background: #8881; border-radius: 0.3rem; }
+.panel { margin: 1.5rem 0; }
+.panel h2, h2 { font-size: 1.1rem; }
+.notice { margin: 0.5rem 0; padding: 0.3rem 0.75rem; border-left: 4px solid #c80; background: #8881; }
+.summary { opacity: 0.85; }
+.searchform { display: grid; gap: 0.5rem; margin-bottom: 1rem; }
+.searchform fieldset { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.check { white-space: nowrap; }

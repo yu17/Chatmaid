@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ conv.title or "Conversation" }} - chatmaid{% endblock %}
+{% block content %}
+<h1>{{ conv.title or "(no subject)" }}</h1>
+<p class="meta">
+  {% if conv.category %}<span class="tag">{{ conv.category }}</span>{% endif %}
+  {{ conv.participants | join(", ") }}
+</p>
+{% if conv.summary %}<p class="summary">{{ conv.summary }}</p>{% endif %}
+<h2>Messages</h2>
+{% include "_thread_list.html" %}
+{% endblock %}

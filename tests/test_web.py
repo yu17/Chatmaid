@@ -12,6 +12,8 @@ from chatmaid.web import app as app_module
 from chatmaid.web.app import _when, check_csrf, create_app
 
 from chatmaid.config import ConfigError, load
+from chatmaid.connectors.evolution.connector import EvolutionConnector
+from chatmaid.llm.base import LLMError
 from chatmaid.web.serve import bind_sockets
 
 
@@ -153,3 +155,109 @@ def test_web_config_defaults_and_validation(tmp_path):
                 'base_path = "x"', 'base_path = "/x/"', "allowed_hosts = [1]"):
         with pytest.raises(ConfigError):
             load(write(bad), project_root=tmp_path)
+
+
+def test_message_page_shows_text_thread_related_and_reply_panel(web_env):
+    first = web_env.arrive("401", subject="Quarterly plan", body="Can we meet Friday?\n\n> old quote")
+    second = web_env.arrive(
+        "402", subject="Re: Quarterly plan", body="Second note", date=1_700_000_600,
+        message_id="<r402@x>", in_reply_to="<m401@x>",
+    )
+    r = web_env.client.get(f"/messages/{first['id']}")
+    assert r.status_code == 200
+    assert "Quarterly plan" in r.text and "Ann" in r.text
+    assert "Can we meet Friday?" in r.text
+    assert '<pre class="mail">' in r.text and "<details" in r.text
+    assert "Related" in r.text and "Reply" in r.text
+    assert f"/messages/{second['id']}" in r.text and "Second note" in r.text
+    assert 'class="thread-msg"' in r.text
+    assert f"/messages/{first['id']}/draft" in r.text or "/drafts/" in r.text
+
+
+def test_message_escapes_html_in_body(web_env):
+    row = web_env.arrive("403", body="<img src=x onerror=alert(1)>", subject="<script>x</script>")
+    r = web_env.client.get(f"/messages/{row['id']}")
+    assert "<img src=x" not in r.text and "<script>x" not in r.text
+    assert "&lt;img src=x" in r.text
+
+
+def test_message_gone_from_source_shows_preview_and_note(web_env, monkeypatch):
+    row = web_env.arrive("404", body="Gone soon body text")
+
+    def gone(self, ref):
+        raise KeyError(ref)
+
+    monkeypatch.setattr(EvolutionConnector, "fetch", gone)
+    r = web_env.client.get(f"/messages/{row['id']}")
+    assert r.status_code == 200
+    assert "no longer in the mail store" in r.text
+    assert "Gone soon" in r.text
+
+
+def test_long_conversation_pages_at_50(web_env):
+    first = web_env.arrive("500", message_id="<root@x>", date=1_700_000_000, subject="long")
+    for i in range(1, 60):
+        web_env.arrive(
+            str(500 + i), message_id=f"<l{i}@x>", in_reply_to="<root@x>",
+            date=1_700_000_000 + i, subject="Re: long",
+        )
+    cid = first["conversation_id"]
+    r = web_env.client.get(f"/conversations/{cid}")
+    assert r.status_code == 200
+    assert r.text.count('class="thread-msg"') == 50
+    m = re.search(r"before=(\d+)", r.text)
+    assert m, "show older link"
+    r2 = web_env.client.get(f"/conversations/{cid}", params={"before": m.group(1)})
+    assert 0 < r2.text.count('class="thread-msg"') <= 10
+    page = web_env.client.get(f"/messages/{first['id']}")
+    assert page.text.count('class="thread-msg"') == 50 and "before=" in page.text
+    assert web_env.client.get("/conversations/99999").status_code == 404
+
+
+def test_search_page_lists_threads_and_escapes_snippets(web_env):
+    web_env.arrive("601", subject="<b>Budget</b> review", body="zebracorn budget <script>alert(1)</script>")
+    r = web_env.client.get("/search", params={"q": "zebracorn"})
+    assert r.status_code == 200
+    assert "/conversations/" in r.text
+    assert "<script>alert" not in r.text and "<b>Budget" not in r.text
+    assert "&lt;b&gt;Budget" in r.text
+
+
+def test_search_without_token_falls_back_with_notice(web_env, monkeypatch):
+    web_env.arrive("602", body="zebracorn again")
+
+    def nope():
+        raise ConfigError("no token")
+
+    monkeypatch.setattr(web_env.services, "make_llm", nope)
+    r = web_env.client.get("/search", params={"q": "zebracorn"})
+    assert r.status_code == 200 and "full-text only: no LM Studio token" in r.text
+    assert "/conversations/" in r.text
+
+
+def test_search_llm_failure_falls_back(web_env, monkeypatch):
+    web_env.arrive("603", body="zebracorn once")
+
+    def boom(*a, **k):
+        raise LLMError("down")
+
+    monkeypatch.setattr(web_env.llm, "embed", boom)
+    r = web_env.client.get("/search", params={"q": "zebracorn"})
+    assert r.status_code == 200 and "full-text only" in r.text
+    assert "/conversations/" in r.text
+
+
+def test_search_filters_and_bad_date(web_env):
+    web_env.arrive("604", body="zebracorn z")
+    assert web_env.client.get("/search").status_code == 200
+    ok = web_env.client.get("/search", params={"q": "zebracorn", "since": "2020-01-01", "until": "2030-01-01"})
+    assert ok.status_code == 200 and "/conversations/" in ok.text
+    assert web_env.client.get("/search", params={"q": "x", "since": "yesterday"}).status_code == 400
+    assert web_env.client.get("/search", params={"q": "x", "until": "2020-13-45"}).status_code == 400
+    assert web_env.client.get("/search", params={"q": "zebracorn", "category": ["bogus"]}).status_code == 400
+
+
+def test_unknown_message_is_404(web_env):
+    r = web_env.client.get("/messages/99999")
+    assert r.status_code == 404
+    assert web_env.client.get("/messages/abc").status_code == 422

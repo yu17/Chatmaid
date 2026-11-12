@@ -1,0 +1,15 @@
+<ul class="rows">
+  {% for r in conv.messages %}
+  <li class="thread-msg">
+    <a href="{{ base }}/messages/{{ r.message_id }}">
+      <span class="sender">{{ r.sender }}</span>
+      <span class="subject">{{ r.subject or "(no subject)" }}</span>
+      <span class="meta">{{ r.sent_at | when }}</span>
+      {% if previews[r.message_id] %}<span class="meta">{{ previews[r.message_id] }}</span>{% endif %}
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+{% if conv.older_before %}
+<p><a href="{{ base }}/conversations/{{ conv.conversation_id }}?before={{ conv.older_before }}">show older</a></p>
+{% endif %}

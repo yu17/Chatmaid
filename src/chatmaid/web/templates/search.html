@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Search - chatmaid{% endblock %}
+{% block content %}
+<h1>Search</h1>
+<form class="searchform" action="{{ base }}/search" method="get">
+  <input type="search" name="q" value="{{ q }}" placeholder="Search mail" aria-label="Search">
+  <label>Contact <input type="text" name="contact" value="{{ contact }}"></label>
+  <label>Since <input type="date" name="since" value="{{ since }}"></label>
+  <label>Until <input type="date" name="until" value="{{ until }}"></label>
+  <fieldset>
+    <legend>Category</legend>
+    {% for c in categories %}
+    <label class="check"><input type="checkbox" name="category" value="{{ c }}"{% if c in chosen %} checked{% endif %}> {{ c }}</label>
+    {% endfor %}
+  </fieldset>
+  <button type="submit">Search</button>
+</form>
+{% if notice %}<p class="notice">{{ notice }}</p>{% endif %}
+{% if q %}
+{% include "_threads.html" %}
+{% endif %}
+{% endblock %}
