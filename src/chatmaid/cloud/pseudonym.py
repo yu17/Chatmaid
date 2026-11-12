@@ -25,7 +25,7 @@ URL_RE = re.compile(
 )
 # Candidates only: `_looks_like_phone` drops dates and short numbers. A trailing full stop
 # ends a sentence, not the match (`(?!\w|\.\w)`), so "call 312-555-0142." is caught too.
-PHONE_RE = re.compile(r"(?<![\w.])\+?(?:\(\d{1,4}\)|\d)[\d\s().\-/]{5,}\d(?!\w|\.\w)")
+PHONE_RE = re.compile(r"(?<![\w.])\+?(?:\(\d{1,4}\)|\d)[\d \t().\-/]{5,}\d(?!\w|\.\w)")
 AMOUNT_RE = re.compile(
     r"(?:[$¥€£]|RMB|USD|CNY)\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s?(?:元|美元|块钱|块)"
 )

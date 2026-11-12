@@ -287,3 +287,28 @@ async def test_stop_during_a_scan_sets_stop_requested(watch_env):
     assert w.stop_requested.is_set() and not task.done()
     release.set()
     await asyncio.wait_for(task, 5)
+
+
+def test_stop_mid_scan_keeps_body_wait_counters(watch_env):
+    w = watch_env.watcher
+    w.handle_trigger("timer")
+    for uid in ("7", "8"):
+        watch_env.add_row("INBOX", uid=uid, message_id=f"<n{uid}@x>", date=1_700_000_500, body="x", **ANN)
+        (watch_env.cache_dir / "a1" / "folders" / "INBOX" / "cur" / "00" / uid).unlink()
+    assert w._handle("timer") == 0
+    keys = sorted(watch_env.store.get_checkpoint("watch", "evolution")["_pending"])
+    assert len(keys) == 2 and all(
+        watch_env.store.get_checkpoint("watch", "evolution")["_pending"][k] == 1 for k in keys
+    )
+    real_fetch = watch_env.connector.fetch
+
+    def fetch_then_stop(ref):
+        msg = real_fetch(ref)
+        w.stop_requested.set()  # stop after the first ref is handled
+        return msg
+
+    watch_env.connector.fetch = fetch_then_stop
+    w._handle("timer")
+    pending = watch_env.store.get_checkpoint("watch", "evolution")["_pending"]
+    assert sorted(pending) == keys  # the unprocessed ref's counter is carried over, not dropped
+    assert sorted(pending.values()) == [1, 2]

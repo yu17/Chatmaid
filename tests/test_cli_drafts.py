@@ -153,3 +153,12 @@ def test_cli_cloud_prompt_eof_or_interrupt_declines(cli_draft_env, capsys, monke
     assert backend.prompts == []
     run(cli_draft_env, "cloud-calls")
     assert "declined" in capsys.readouterr().out
+
+
+def test_drafts_reports_missing_account_without_traceback(fake_env, capsys):
+    text = fake_env.config_path.read_text(encoding="utf-8")
+    assert 'accounts = ["a1"]' in text
+    fake_env.config_path.write_text(text.replace('accounts = ["a1"]', 'accounts = ["nope"]'), encoding="utf-8")
+    assert main(["--config", str(fake_env.config_path), "drafts"]) == 1
+    err = capsys.readouterr().err
+    assert "no Evolution .source file for account 'nope'" in err and "Traceback" not in err

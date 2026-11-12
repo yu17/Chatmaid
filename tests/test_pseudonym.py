@@ -131,3 +131,10 @@ def test_lower_case_and_stopword_name_parts_are_not_redacted():
 def test_name_parts_drop_punctuation():
     p = Pseudonymizer([("Smith, John", "PERSON")])
     assert p.redact("Smith wrote to John") == "[PERSON_1] wrote to [PERSON_2]"
+
+
+def test_phone_numbers_do_not_join_across_lines():
+    p = Pseudonymizer([])
+    out = p.redact("Order 123\n456 7890 thanks\nCall 312-555-0142\nnext 99")
+    assert all("\n" not in original for original in p.mapping.values())
+    assert "Order 123\n" in out and "\nnext 99" in out

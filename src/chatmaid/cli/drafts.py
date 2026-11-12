@@ -43,7 +43,11 @@ def register_cloud_check(subparsers) -> None:
 
 def _drafts_command(args: argparse.Namespace) -> int:
     cfg = load_config(Path(args.config))
-    store, connector, flow = common.open_flow(cfg, need_llm=False)
+    try:
+        store, connector, flow = common.open_flow(cfg, need_llm=False)
+    except ConfigError as e:
+        print(str(e), file=sys.stderr)
+        return 1
     try:
         print("id  conv  status  created  subject  text")
         status = None if args.status == "all" else args.status

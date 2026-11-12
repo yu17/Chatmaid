@@ -97,6 +97,9 @@ class Watcher:
                 # every folder with refs left over keeps its old watermark; refs already
                 # stored there are skipped by has_ref on the next scan
                 held_back.update(f"{r.account}/{r.folder}" for r in refs[i:])
+                for r in refs[i:]:  # body-wait counters of the refs not reached survive the stop
+                    if r.key() in pending:
+                        still_pending[r.key()] = pending[r.key()]
                 log.info("stop requested: %d messages left for the next scan", len(refs) - i)
                 break
             if self.store.has_ref(ref.key()):

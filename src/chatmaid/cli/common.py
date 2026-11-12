@@ -3,9 +3,9 @@
 from datetime import datetime, timezone
 
 from chatmaid.cloud.registry import make_backend
-from chatmaid.config import read_token  # noqa: F401  (re-exported; callers use it through this module)
+from chatmaid.config import ConfigError, read_token  # noqa: F401  (re-exported; callers use it through this module)
 from chatmaid.connectors.evolution.connector import EvolutionConnector
-from chatmaid.connectors.evolution.sources import load_accounts
+from chatmaid.connectors.evolution.sources import MissingAccount, load_accounts
 from chatmaid.identity import OwnerIdentity
 from chatmaid.llm.base import LLMError
 from chatmaid.llm.fake import CANNED, FakeLLM
@@ -55,7 +55,10 @@ def open_flow(
         llm = NoLLM()
     else:
         llm = lmstudio_client(cfg, read_token(cfg))
-    accounts = load_accounts(cfg.email.evolution_config_dir, cfg.email.accounts)
+    try:
+        accounts = load_accounts(cfg.email.evolution_config_dir, cfg.email.accounts)
+    except MissingAccount as e:
+        raise ConfigError(str(e)) from e
     owner = OwnerIdentity.from_accounts(accounts, cfg.owner.extra_addresses, cfg.owner.aliases)
     connector = EvolutionConnector(cfg.email, accounts, owner)
     try:
