@@ -160,8 +160,16 @@ Notes:
   `promotional`, `newsletter` or `system`, is `bulk` by rule, also without a
   model call.
 - When a draft cannot be written (for example LM Studio is down), the message
-  stays indexed and a `draft_failed` event records the error and the message id;
-  `draft run --message ID` retries it.
+  stays indexed and a `draft_failed` event records the error and the message id.
+  `watch` keeps a retry queue of such untriaged messages: at start and after
+  each trigger it retries up to five of them, newest first. Only mail that
+  `watch` routed is queued, not mail `init` indexed; mail older than
+  `draft.max_age_days` and threads you have replied in since drop out. A
+  message waits 10 minutes after its first failure and 20 after its second,
+  and gets at most three attempts in all; a message that cannot be read from
+  the mail store counts as an attempt too. The web UI's Status page lists the
+  queue with a Retry button that tries again at once, and `draft run
+  --message ID` retries any message by hand.
 - A draft stores the generated candidate texts in full, the language, and a
   context record (contact card, summary, recent previews, memories, style
   profile, previews of the past replies below). The owner's own sent text is
@@ -178,7 +186,11 @@ Notes:
 - When your own reply in the conversation shows up in a Sent folder, the pending
   draft is resolved: `approved` if what you wrote, without the quoted history
   (`On ... wrote:`, `-----Original Message-----`, `在...写道`, `>` lines) and the
-  `-- ` signature, equals a candidate or starts with one; `edited` otherwise.
+  `-- ` signature, equals a candidate or starts with one and adds at most 200
+  characters or 20% of the candidate's length, whichever is more (a sign-off or
+  a line); `edited` otherwise. If you already approved or edited the draft in
+  the web UI, the mail you then send is recorded as that draft's outcome and
+  its status stays as you set it.
 - `draft regenerate --comment` writes a new round from your feedback.
 - `approve` records that you accept a version. It sends nothing and writes
   nothing to Evolution or a mail server; you still send the reply yourself.
@@ -238,10 +250,13 @@ button). Configure it in `[web]`:
 
 There is no login: the owner's WireGuard network is the boundary, so do not
 listen on an address that is reachable from outside it. Pages are plain HTTP:
-Copy works on 127.0.0.1 and localhost (secure contexts); on other plain-HTTP
-addresses (e.g. WireGuard), Copy selects the text instead. A message whose
-triage keeps failing is retried at most three times, then drops off the Status
-page's "waiting for triage" list; its failures stay under Recent failures. Every response carries `X-Frame-Options: DENY` and a
+Copy works on 127.0.0.1 (a secure context); `localhost` works too, but only if
+you add it to `web.allowed_hosts`. On other plain-HTTP addresses (e.g.
+WireGuard), Copy selects the text instead. The Status page's "waiting for
+triage" list is `watch`'s retry queue (see Draft flow); its Retry button skips
+the queue's wait. After three failed attempts a message drops off the list;
+its failures stay under Recent failures. Every response carries
+`X-Frame-Options: DENY` and a
 Content-Security-Policy (no inline script or style, no framing, forms post only
 to the app); every POST needs the per-process CSRF token. All assets are served
 by the app.
@@ -289,9 +304,9 @@ your choice; you still send the reply yourself.
   indexes it.
 - An index built with `--since` before checkpoints were recorded needs one
   `init --reset-checkpoints` before a complete-history ingest.
-- There is no automatic queue of untriaged messages yet (planned for phase 1c).
-  A message whose draft failed, or that was routed just before `watch` was
-  killed hard, is indexed but not drafted until you run `draft run --message
-  ID` (the id is in the `watch` line and the `draft_failed` event).
+- The retry queue covers only mail `watch` routed. A message `init` indexed,
+  or one that used up its three attempts, is not drafted until you run `draft
+  run --message ID` (the id is in the `watch` line and the `draft_failed`
+  event) or press Draft a reply on its page in the web UI.
 - `watch`, unlike `init`, does not stop inside a model call: a stop request
   waits for the triage and draft of the message in hand.
