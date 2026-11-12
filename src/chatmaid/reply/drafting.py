@@ -8,7 +8,7 @@ from chatmaid.connectors.base import Connector
 from chatmaid.llm import prompts
 from chatmaid.llm.base import LLM, LLMError
 from chatmaid.llm.jsoncall import complete_json
-from chatmaid.lookup import Hit, search_history
+from chatmaid.lookup import ThreadHit, search
 from chatmaid.reply.context import ReplyContext
 from chatmaid.store import Store
 
@@ -19,11 +19,11 @@ class Candidate:
     rationale: str
 
 
-def _hit_lines(hits: list[Hit]) -> str:
+def _hit_lines(hits: list[ThreadHit]) -> str:
     if not hits:
         return "(nothing found)"
     return "\n".join(
-        f"[{datetime.fromtimestamp(h.sent_at, UTC):%Y-%m-%d} {h.sender}] {h.subject} — {h.snippet}"
+        f"[{datetime.fromtimestamp(h.last_message_at or 0, UTC):%Y-%m-%d}] {h.title} — {h.evidence}"
         for h in hits
     )
 
@@ -53,9 +53,8 @@ def draft_reply(
     found = _candidates(out, cfg.draft.candidates)
     if not found and out["lookup"]:
         query = out["lookup"]
-        hits = search_history(
+        hits = search(
             store,
-            connector,
             llm,
             query=query,
             contact=sender_email,

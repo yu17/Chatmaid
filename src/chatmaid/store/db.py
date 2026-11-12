@@ -1,8 +1,9 @@
-"""SQLite store (schema v2) with a sqlite-vec embedding index."""
+"""SQLite store with a sqlite-vec embedding index and a full-text conversation index."""
 
 import contextlib
 import json
 import sqlite3
+import struct
 import time
 from collections.abc import Iterator
 from importlib import resources
@@ -35,7 +36,7 @@ def _like_escape(text: str) -> str:
 
 
 class Store:
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(self, path: Path, *, embedding_dim: int):
         # autocommit=True: no implicit transactions, and executescript() does not COMMIT an
@@ -911,6 +912,108 @@ class Store:
             (sqlite_vec.serialize_float32(vector), k) + ((kind,) if kind is not None else ()),
         ).fetchall()
         return [(r["kind"], r["ref_id"], r["distance"]) for r in rows]
+
+    def embedding_vector(self, kind: str, ref_id: int) -> list[float] | None:
+        row = self._conn.execute(
+            "SELECT v.embedding FROM embedding_item e JOIN vec_embedding v ON v.item_id = e.id "
+            "WHERE e.kind = ? AND e.ref_id = ?",
+            (kind, ref_id),
+        ).fetchone()
+        if row is None:
+            return None
+        blob = row[0]
+        return list(struct.unpack(f"{len(blob) // 4}f", blob))
+
+    # --- conversation search ---
+
+    @staticmethod
+    def _conversation_filter(
+        categories: tuple[str, ...], contact: str | None, since: int | None, until: int | None
+    ) -> tuple[str, list]:
+        """SQL conditions on `conversation c`, for the lookup filters."""
+        where: list[str] = []
+        params: list = []
+        if categories:
+            where.append(f"c.category IN ({','.join('?' * len(categories))})")
+            params += list(categories)
+        if contact:
+            where.append(
+                "EXISTS (SELECT 1 FROM message m JOIN identity i ON i.id = m.sender_identity_id "
+                "WHERE m.conversation_id = c.id "
+                "AND (i.address LIKE ? ESCAPE '\\' OR i.display_name LIKE ? ESCAPE '\\'))"
+            )
+            params += [f"%{_like_escape(contact)}%"] * 2
+        if since is not None or until is not None:
+            cond = "m.conversation_id = c.id"
+            if since is not None:
+                cond += " AND m.sent_at >= ?"
+                params.append(since)
+            if until is not None:
+                cond += " AND m.sent_at < ?"
+                params.append(until)
+            where.append(f"EXISTS (SELECT 1 FROM message m WHERE {cond})")
+        return " AND ".join(where), params
+
+    def filter_conversations(
+        self,
+        ids: list[int],
+        *,
+        categories: tuple[str, ...] = (),
+        contact: str | None = None,
+        since: int | None = None,
+        until: int | None = None,
+    ) -> set[int]:
+        """The subset of `ids` that exist and pass the lookup filters."""
+        if not ids:
+            return set()
+        cond, params = self._conversation_filter(categories, contact, since, until)
+        sql = f"SELECT c.id FROM conversation c WHERE c.id IN ({','.join('?' * len(ids))})"
+        if cond:
+            sql += " AND " + cond
+        return {r[0] for r in self._conn.execute(sql, list(ids) + params)}
+
+    def search_conversations_text(
+        self,
+        *,
+        match: str | None,
+        like_terms: tuple[str, ...] = (),
+        limit: int = 50,
+        categories: tuple[str, ...] = (),
+        contact: str | None = None,
+        since: int | None = None,
+        until: int | None = None,
+    ) -> list[tuple[int, str]]:
+        """Full-text hits as (conversation id, snippet), best first.
+
+        `match` is an FTS5 query ranked by bm25 (title weighs most, then summary, then message
+        subjects and previews). Without one, `like_terms` (each shorter than a trigram) must
+        all appear in the conversation's text, newest first.
+        """
+        cond, params = self._conversation_filter(categories, contact, since, until)
+        snippet = "snippet(conversation_fts, -1, '[', ']', '…', 64)"
+        if match:
+            sql = (
+                f"SELECT c.id, {snippet} AS snip FROM conversation_fts f "
+                "JOIN conversation c ON c.id = f.rowid WHERE conversation_fts MATCH ?"
+            )
+            args: list = [match]
+            order = " ORDER BY bm25(conversation_fts, 4.0, 2.0, 1.0)"
+        elif like_terms:
+            hay = "(f.title || ' ' || f.summary || ' ' || f.body)"
+            sql = (
+                "SELECT c.id, substr(f.summary, 1, 160) AS snip FROM conversation_fts f "
+                "JOIN conversation c ON c.id = f.rowid WHERE "
+                + " AND ".join(f"{hay} LIKE ? ESCAPE '\\'" for _ in like_terms)
+            )
+            args = [f"%{_like_escape(t)}%" for t in like_terms]
+            order = " ORDER BY c.last_message_at DESC"
+        else:
+            return []
+        if cond:
+            sql += " AND " + cond
+        sql += order + " LIMIT ?"
+        rows = self._conn.execute(sql, args + params + [limit]).fetchall()
+        return [(r[0], r[1] or "") for r in rows]
 
     # --- event log and counts ---
 

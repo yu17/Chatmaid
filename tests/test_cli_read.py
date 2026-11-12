@@ -58,7 +58,7 @@ def test_cli_lookup_no_vector(cli_env, capsys):
     cfg = str(cli_env.config_path)
     assert main(["--config", cfg, "lookup", "hello", "--no-vector", "--since", "2020-01-01"]) == 0
     out = capsys.readouterr().out
-    assert re.match(r"\d{4}-\d{2}-\d{2}  ", out) and "hello" in out.lower()
+    assert re.match(r"\d+  \d{4}-\d{2}-\d{2}  conversation  \d+ msg  ", out) and "[hello]" in out.lower()
 
 
 def test_cli_init_ingest_needs_no_token(fake_env, capsys):
@@ -136,13 +136,21 @@ def test_cli_init_stopped_exits_130(fake_env, monkeypatch, capsys):
     assert rc == 130 and "stopped; run the same command to resume" in capsys.readouterr().err
 
 
-def test_cli_lookup_threads_and_category(cli_env, capsys, monkeypatch):
+def test_cli_lookup_vector_and_category(cli_env, capsys, monkeypatch):
     monkeypatch.setattr("chatmaid.cli._lmstudio_client", lambda cfg, token: FakeLLM(dim=4))
     monkeypatch.setattr("chatmaid.cli.read_token", lambda cfg: "t")
     cfg = ["--config", str(cli_env.config_path)]
-    assert main([*cfg, "lookup", "S1", "--threads"]) == 0 and "conversation" in capsys.readouterr().out
+    assert main([*cfg, "lookup", "S1"]) == 0 and "conversation" in capsys.readouterr().out
     assert main([*cfg, "lookup", "hello", "--no-vector", "--category", "event"]) == 0 and capsys.readouterr().out == ""
-    assert main([*cfg, "lookup", "S1", "--threads", "--no-vector"]) == 2
+
+
+def test_cli_related(cli_env, capsys):
+    cfg = ["--config", str(cli_env.config_path)]
+    assert main([*cfg, "related", "1", "--no-vector"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines and all(not line.startswith("1  ") for line in lines)  # same subject, not itself
+    assert main([*cfg, "related", "999", "--no-vector"]) == 1
+    assert "no conversation 999" in capsys.readouterr().err
 
 
 def test_cli_senders_and_status_show_categories(cli_env, capsys):
@@ -154,12 +162,12 @@ def test_cli_senders_and_status_show_categories(cli_env, capsys):
     assert main([*cfg, "conversations", "--category", "conversation"]) == 0 and "conversation" in capsys.readouterr().out
 
 
-def test_cli_lookup_threads_without_client_exits_2(cli_env, capsys, monkeypatch):
+def test_cli_lookup_without_token_falls_back_to_full_text(cli_env, capsys, monkeypatch):
     def no_token(cfg):
         raise ConfigError("no token")
 
     monkeypatch.setattr("chatmaid.cli.read_token", no_token)
     cfg = ["--config", str(cli_env.config_path)]
-    assert main([*cfg, "lookup", "S1", "--threads"]) == 2
-    err = capsys.readouterr().err
-    assert "thread search needs the embedding model" in err and "Traceback" not in err
+    assert main([*cfg, "lookup", "hello"]) == 0
+    captured = capsys.readouterr()
+    assert "falling back to full-text search only" in captured.err and "[hello]" in captured.out.lower()

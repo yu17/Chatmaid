@@ -28,7 +28,7 @@ from chatmaid.init.progress import ProgressLogHandler
 from chatmaid.llm.fake import FakeLLM
 from chatmaid.lock import Busy, exclusive
 from chatmaid.init.categories import CATEGORIES
-from chatmaid.lookup import search_history, search_threads
+from chatmaid.lookup import related, search
 from chatmaid.llm.fake import CANNED
 from chatmaid.model import SourceRef
 from chatmaid.reply.flow import ReplyFlow
@@ -297,69 +297,87 @@ def register_show(subparsers) -> None:
     p.set_defaults(handler=_show_command)
 
 
+def _print_threads(hits) -> None:
+    for t in hits:
+        print(
+            f"{t.conversation_id}  {_day(t.last_message_at)}  {t.category or '-'}  "
+            f"{t.message_count} msg  {t.title}  \u2014  {t.evidence}"
+        )
+
+
+def _lookup_llm(cfg, no_vector: bool):
+    if no_vector:
+        return None
+    try:
+        return _lmstudio_client(cfg, read_token(cfg))
+    except ConfigError as e:
+        print(f"warning: {e}; falling back to full-text search only", file=sys.stderr)
+        return None
+
+
 def _lookup_command(args: argparse.Namespace) -> int:
     cfg = load_config(Path(args.config))
-    categories = tuple(args.category or ())
-    llm = None
-    if not args.no_vector:
-        try:
-            llm = _lmstudio_client(cfg, read_token(cfg))
-        except ConfigError as e:
-            print(f"warning: {e}; falling back to metadata search only", file=sys.stderr)
-    if args.threads and llm is None:
-        print("thread search needs the embedding model", file=sys.stderr)
-        return 2
-    connector = None
+    llm = _lookup_llm(cfg, args.no_vector)
     store = None
     try:
-        accounts = load_accounts(cfg.email.evolution_config_dir, cfg.email.accounts)
-        owner = OwnerIdentity.from_accounts(accounts, cfg.owner.extra_addresses, cfg.owner.aliases)
-        connector = EvolutionConnector(cfg.email, accounts, owner)
         store = _open_store(cfg)
-        if args.threads:
-            thread_hits = search_threads(
-                store, llm, query=args.query, categories=categories, limit=args.limit,
-                embedding_model=cfg.lmstudio.model_embedding,
-            )
-        else:
-            hits = search_history(
-                store, connector, llm, query=args.query, contact=args.contact,
-                since=args.since, until=args.until, limit=args.limit,
-                embedding_model=cfg.lmstudio.model_embedding, categories=categories,
-            )
-    except LLMError as e:
-        print(f"lookup failed: {e}", file=sys.stderr)
-        return 1
-    except (sqlite3.Error, OSError) as e:
+        hits = search(
+            store, llm, query=args.query, embedding_model=cfg.lmstudio.model_embedding,
+            contact=args.contact, since=args.since, until=args.until,
+            categories=tuple(args.category or ()), limit=args.limit,
+        )
+    except (LLMError, sqlite3.Error, OSError) as e:
         print(f"lookup failed: {e}", file=sys.stderr)
         return 1
     finally:
         if store is not None:
             store.close()
-        if connector is not None:
-            connector.close()
-    if args.threads:
-        for t in thread_hits:
-            summary = t.summary.replace("\n", " ")
-            print(f"{t.conversation_id}  {_day(t.last_message_at)}  {t.category or '-'}  {t.title}  \u2014  {summary}")
-        return 0
-    for h in hits:
-        snippet = h.snippet.replace("\n", " ")
-        print(f"{_day(h.sent_at)}  {h.sender}  {h.subject}  \u2014  {snippet}")
+    _print_threads(hits)
     return 0
 
 
 def register_lookup(subparsers) -> None:
-    p = subparsers.add_parser("lookup", help="search message history")
+    p = subparsers.add_parser("lookup", help="search conversations by topic")
     p.add_argument("query")
-    p.add_argument("--contact", default=None)
+    p.add_argument("--contact", default=None, help="only threads with a sender matching this")
     p.add_argument("--since", type=_parse_since, default=None, metavar="YYYY-MM-DD")
     p.add_argument("--until", type=_parse_since, default=None, metavar="YYYY-MM-DD")
     p.add_argument("--limit", type=int, default=20)
-    p.add_argument("--no-vector", action="store_true", help="metadata search only")
+    p.add_argument("--no-vector", action="store_true", help="full-text search only")
     p.add_argument("--category", action="append", choices=CATEGORIES, default=None)
-    p.add_argument("--threads", action="store_true", help="search conversation summaries")
     p.set_defaults(handler=_lookup_command)
+
+
+def _related_command(args: argparse.Namespace) -> int:
+    cfg = load_config(Path(args.config))
+    llm = _lookup_llm(cfg, args.no_vector)
+    store = None
+    try:
+        store = _open_store(cfg)
+        hits = related(
+            store, llm, args.conversation, embedding_model=cfg.lmstudio.model_embedding,
+            categories=tuple(args.category or ()), limit=args.limit,
+        )
+    except KeyError:
+        print(f"no conversation {args.conversation}", file=sys.stderr)
+        return 1
+    except (LLMError, sqlite3.Error, OSError) as e:
+        print(f"related failed: {e}", file=sys.stderr)
+        return 1
+    finally:
+        if store is not None:
+            store.close()
+    _print_threads(hits)
+    return 0
+
+
+def register_related(subparsers) -> None:
+    p = subparsers.add_parser("related", help="conversations on the same topic as one conversation")
+    p.add_argument("conversation", type=int, help="conversation id (from conversations/lookup)")
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--no-vector", action="store_true", help="subject matching only")
+    p.add_argument("--category", action="append", choices=CATEGORIES, default=None)
+    p.set_defaults(handler=_related_command)
 
 
 async def _watch(watcher: Watcher) -> None:
@@ -688,6 +706,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, argparse._SubParsersAction]
     register_senders(subparsers)
     register_show(subparsers)
     register_lookup(subparsers)
+    register_related(subparsers)
     register_watch(subparsers)
     register_cloud_check(subparsers)
     register_drafts(subparsers)

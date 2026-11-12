@@ -12,6 +12,7 @@ from chatmaid.config import Config
 from chatmaid.connectors.base import Connector
 from chatmaid.init.chunking import detect_language
 from chatmaid.llm.base import LLM, LLMError
+from chatmaid.lookup import REPLY_TASK, embed_query
 from chatmaid.model import NormalizedMessage, SourceRef, make_preview
 from chatmaid.quoting import strip_reply_chrome
 from chatmaid.store import Store
@@ -122,7 +123,7 @@ def _recent(
 
 def _query_vector(llm: LLM, cfg: Config, msg: NormalizedMessage) -> list[float] | None:
     try:
-        return llm.embed([msg.text[:2000]], model=cfg.lmstudio.model_embedding)[0]
+        return embed_query(llm, msg.text[:2000], model=cfg.lmstudio.model_embedding, task=REPLY_TASK)
     except LLMError as e:
         log.warning("embedding the incoming message failed, skipping vector memories and examples: %s", e)
         return None

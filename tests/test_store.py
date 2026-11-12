@@ -323,3 +323,22 @@ def test_set_conversation_summary_category_and_merge_clears_it(store, sample_mes
     with store.transaction():
         store.merge_conversations(a, b)
     assert store.conversation(a)["category"] is None
+
+
+def test_v4_upgrade_backfills_the_full_text_index(tmp_path):
+    path = tmp_path / "v3.sqlite"
+    conn = sqlite3.connect(path)
+    conn.enable_load_extension(True); sqlite_vec.load(conn)
+    for n in (1, 2, 3):
+        conn.executescript(resources.files("chatmaid.store").joinpath(f"schema_v{n}.sql").read_text())
+    conn.execute("INSERT INTO conversation (platform, key, title, kind, summary) VALUES ('email','k','Visa','thread','S')")
+    conn.execute("INSERT INTO message (conversation_id, ref_key, platform, account, subject, preview) "
+                 "VALUES (1, 'r', 'email', 'a', 'Visa', 'appointment on Monday')")
+    conn.commit(); conn.close()
+    s = Store(path, embedding_dim=4)
+    try:
+        assert s._conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        hits = s.search_conversations_text(match='"appointment"')
+        assert [cid for cid, _ in hits] == [1] and "[appointment]" in hits[0][1]
+    finally:
+        s.close()

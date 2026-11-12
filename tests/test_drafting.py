@@ -58,7 +58,7 @@ def test_draft_runs_one_lookup_round(digested_env):
     assert len(calls) == 2
     second = calls[1]["user"]
     assert "## History lookup for: office" in second
-    assert "me@x.org] test — thanks, see you tomorrow at the office" in second
+    assert "] test — " in second and "see you tomorrow at the [office]" in second
     assert "The lookup is done; now write the candidates." in second
 
 
@@ -94,3 +94,4 @@ def test_revise_includes_previous_and_comment(digested_env):
     assert "## Previous draft\nLong text" in user
     assert "## Owner's feedback\nmake it shorter" in user
     assert llm.calls[0]["model"] == digested_env.config.lmstudio.model
+
