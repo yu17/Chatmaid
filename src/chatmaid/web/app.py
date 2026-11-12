@@ -1,13 +1,14 @@
 """The FastAPI app: host check, CSRF token, templates, static files and the Inbox."""
 
 import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
 import jinja2
-from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.exception_handlers import http_exception_handler
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -19,6 +20,7 @@ from chatmaid.llm.base import LLMError
 from chatmaid.lookup import related, search
 from chatmaid.model import SourceRef
 from chatmaid.views import account_labels, conversation_view, inbox, message_view
+from chatmaid.web.jobs import JobRunner
 from chatmaid.web.services import Services
 
 HERE = Path(__file__).parent
@@ -67,9 +69,21 @@ def check_csrf(request: Request, csrf: str = Form("")) -> None:
         raise HTTPException(status_code=403, detail="bad CSRF token")
 
 
-def create_app(services: Services, *, jobs=None) -> FastAPI:
+def create_app(services: Services, *, jobs: JobRunner | None = None) -> FastAPI:
     cfg = services.cfg
-    app = FastAPI(root_path=cfg.web.base_path, docs_url=None, redoc_url=None, openapi_url=None)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        runner = app.state.jobs = jobs or JobRunner(services)
+        try:
+            yield
+        finally:
+            runner.stop()
+
+    app = FastAPI(
+        root_path=cfg.web.base_path, docs_url=None, redoc_url=None, openapi_url=None,
+        lifespan=lifespan,
+    )
     app.state.services = services
     app.state.jobs = jobs
     app.state.csrf = secrets.token_urlsafe(32)
@@ -137,6 +151,7 @@ def create_app(services: Services, *, jobs=None) -> FastAPI:
             account = SourceRef.from_key(store.message(message_id)["ref_key"]).account
             account = account_labels(connector).get(account, account)
             draft = store.pending_draft_for(msg.conversation_id)
+            jobs = request.app.state.jobs.for_subject("draft", message_id)
             hits, notice = with_fallback(
                 lambda llm: related(
                     store, llm, msg.conversation_id,
@@ -146,7 +161,7 @@ def create_app(services: Services, *, jobs=None) -> FastAPI:
             return templates.TemplateResponse(
                 request, "message.html",
                 {"msg": msg, "conv": conv, "account": account, "draft": draft, "hits": hits,
-                 "notice": notice, "previews": previews_of(store, conv)},
+                 "notice": notice, "previews": previews_of(store, conv), "jobs": jobs},
             )
 
     @app.get("/conversations/{conversation_id}")
@@ -187,5 +202,108 @@ def create_app(services: Services, *, jobs=None) -> FastAPI:
             {"q": q, "contact": contact, "since": since, "until": until, "chosen": category,
              "categories": CATEGORIES, "hits": hits, "notice": notice},
         )
+
+    def redirect(request: Request, path: str) -> RedirectResponse:
+        return RedirectResponse(request.scope.get("root_path", "") + path, status_code=303)
+
+    @app.post("/messages/{message_id}/draft", dependencies=[Depends(check_csrf)])
+    def draft_message(request: Request, message_id: int):
+        with services.session() as (store, _connector):
+            row = store.message(message_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="no such message")
+        request.app.state.jobs.submit(
+            "draft", "Drafting a reply", message_id, lambda flow: flow.draft_for_message(message_id)
+        )
+        return redirect(request, f"/messages/{message_id}")
+
+    def draft_page_response(request: Request, draft_id: int, flash: str | None = None):
+        with services.session() as (store, connector):
+            draft = store.draft(draft_id)
+            if draft is None:
+                raise HTTPException(status_code=404, detail="no such draft")
+            versions = store.draft_versions(draft_id)
+            latest = max((v["round"] for v in versions), default=0)
+            current = [v for v in versions if v["round"] == latest]
+            earlier = {}
+            for v in versions:
+                if v["round"] < latest:
+                    earlier.setdefault(v["round"], []).append(v)
+            try:
+                msg = message_view(store, connector, draft["message_id"])
+            except KeyError:
+                msg = None
+            return templates.TemplateResponse(
+                request, "draft.html",
+                {"draft": draft, "msg": msg, "current": current, "earlier": earlier,
+                 "jobs": request.app.state.jobs.for_subject("regenerate", draft_id),
+                 "flash": flash},
+            )
+
+    @app.get("/drafts/{draft_id}")
+    def draft_page(request: Request, draft_id: int):
+        return draft_page_response(request, draft_id)
+
+    def act(request: Request, draft_id: int, action: str, **kwargs):
+        """Run a synchronous draft action; a refusal comes back as a message on the page."""
+        with services.session() as (store, connector):
+            if store.draft(draft_id) is None:
+                raise HTTPException(status_code=404, detail="no such draft")
+            try:
+                services.flow(store, connector).resolve(draft_id, action, **kwargs)
+            except ValueError as e:
+                error = str(e)
+            else:
+                error = None
+        if error is not None:
+            return draft_page_response(request, draft_id, flash=error)
+        return redirect(request, f"/drafts/{draft_id}")
+
+    @app.post("/drafts/{draft_id}/regenerate", dependencies=[Depends(check_csrf)])
+    def regenerate_draft(
+        request: Request, draft_id: int, comment: str = Form(""), from_version: str = Form("")
+    ):
+        with services.session() as (store, _connector):
+            draft = store.draft(draft_id)
+            if draft is None:
+                raise HTTPException(status_code=404, detail="no such draft")
+        if draft["status"] != "pending":
+            return draft_page_response(
+                request, draft_id, flash=f"draft {draft_id} is {draft['status']}, not pending"
+            )
+        if not comment.strip():
+            return draft_page_response(request, draft_id, flash="Say what to change first.")
+        try:
+            version = int(from_version) if from_version else None
+        except ValueError:
+            raise HTTPException(status_code=400, detail="bad version") from None
+        request.app.state.jobs.submit(
+            "regenerate", "Regenerating", draft_id,
+            lambda flow: flow.regenerate(draft_id, comment, from_version=version),
+        )
+        return redirect(request, f"/drafts/{draft_id}")
+
+    @app.post("/drafts/{draft_id}/approve", dependencies=[Depends(check_csrf)])
+    def approve_draft(request: Request, draft_id: int, version_id: str = Form("")):
+        try:
+            version = int(version_id) if version_id else None
+        except ValueError:
+            raise HTTPException(status_code=400, detail="bad version") from None
+        return act(request, draft_id, "approve", version_id=version)
+
+    @app.post("/drafts/{draft_id}/edit", dependencies=[Depends(check_csrf)])
+    def edit_draft(request: Request, draft_id: int, text: str = Form("")):
+        return act(request, draft_id, "edit", text=text.strip())
+
+    @app.post("/drafts/{draft_id}/dismiss", dependencies=[Depends(check_csrf)])
+    def dismiss_draft(request: Request, draft_id: int):
+        return act(request, draft_id, "dismiss")
+
+    @app.get("/jobs/{job_id}")
+    def job_state(request: Request, job_id: str):
+        job = request.app.state.jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="no such job")
+        return JSONResponse({"state": job.state, "result": job.result, "error": job.error})
 
     return app

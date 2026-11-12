@@ -1,0 +1,7 @@
+{% for j in jobs if j.state in ("queued", "running", "failed") %}
+{% if j.state == "failed" %}
+<p class="notice">{{ j.label }} failed: {{ j.error }}</p>
+{% else %}
+<p class="notice" data-job="{{ j.id }}">{{ j.label }}: {{ j.state }}&hellip;</p>
+{% endif %}
+{% endfor %}

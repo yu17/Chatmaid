@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Draft #{{ draft.id }} - chatmaid{% endblock %}
+{% block content %}
+<h1>Draft #{{ draft.id }} <span class="tag{% if draft.status == "pending" %} draft{% endif %}">{{ draft.status }}</span></h1>
+{% if msg %}
+<p>Reply to <a href="{{ base }}/messages/{{ msg.message_id }}">{{ msg.subject or "(no subject)" }}</a> from {{ msg.sender }}</p>
+{% else %}
+<p>Reply to <a href="{{ base }}/messages/{{ draft.message_id }}">message #{{ draft.message_id }}</a></p>
+{% endif %}
+{% include "_jobs.html" %}
+
+{% if draft.status != "pending" and draft.final_text %}
+<h2>Final text</h2>
+<pre class="mail" id="final-text">{{ draft.final_text }}</pre>
+<p><button type="button" data-copy="final-text">Copy</button> <span class="meta" data-copy-note="final-text"></span></p>
+{% endif %}
+
+<h2>Candidates</h2>
+{% for v in current %}
+<section class="panel candidate">
+  <p class="meta">{{ v.origin }}{% if v.cloud_call_id %} (cloud){% endif %}, round {{ v.round }}, candidate {{ v.candidate }}</p>
+  <pre class="mail" id="version-{{ v.id }}">{{ v.text }}</pre>
+  {% if v.rationale %}<p class="meta">{{ v.rationale }}</p>{% endif %}
+  {% if v.comment %}<p class="meta">Your comment: {{ v.comment }}</p>{% endif %}
+  <div class="actions">
+    {% if draft.status == "pending" %}
+    <form action="{{ base }}/drafts/{{ draft.id }}/approve" method="post">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="version_id" value="{{ v.id }}">
+      <button type="submit">Approve</button>
+    </form>
+    {% endif %}
+    <button type="button" data-copy="version-{{ v.id }}">Copy</button>
+    <span class="meta" data-copy-note="version-{{ v.id }}"></span>
+  </div>
+</section>
+{% else %}
+<p class="empty">No candidates.</p>
+{% endfor %}
+
+{% if draft.status == "pending" %}
+<section class="panel">
+  <h2>Ask for changes</h2>
+  <form action="{{ base }}/drafts/{{ draft.id }}/regenerate" method="post">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Feedback<br><textarea name="comment" rows="3" required></textarea></label>
+    {% if current|length > 1 %}
+    <p><label>Start from
+      <select name="from_version">
+        <option value="">the first candidate</option>
+        {% for v in current %}<option value="{{ v.id }}">candidate {{ v.candidate }}</option>{% endfor %}
+      </select></label></p>
+    {% endif %}
+    <p><button type="submit">Regenerate</button></p>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Edit</h2>
+  <form action="{{ base }}/drafts/{{ draft.id }}/edit" method="post">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <textarea name="text" rows="8" required>{{ current[0].text if current }}</textarea>
+    <p><button type="submit">Save my edit</button></p>
+  </form>
+</section>
+
+<form action="{{ base }}/drafts/{{ draft.id }}/dismiss" method="post">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit">Dismiss this draft</button>
+</form>
+{% endif %}
+
+{% for round, versions in earlier.items() | sort(reverse=true) %}
+<details>
+  <summary>Round {{ round }}</summary>
+  {% for v in versions %}
+  <p class="meta">{{ v.origin }}{% if v.cloud_call_id %} (cloud){% endif %}, candidate {{ v.candidate }}{% if v.comment %}, comment: {{ v.comment }}{% endif %}</p>
+  <pre class="mail">{{ v.text }}</pre>
+  {% if v.rationale %}<p class="meta">{{ v.rationale }}</p>{% endif %}
+  {% endfor %}
+</details>
+{% endfor %}
+{% endblock %}

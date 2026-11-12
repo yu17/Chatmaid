@@ -261,3 +261,142 @@ def test_unknown_message_is_404(web_env):
     r = web_env.client.get("/messages/99999")
     assert r.status_code == 404
     assert web_env.client.get("/messages/abc").status_code == 422
+
+
+# -- Task 9: background jobs and the Draft page -----------------------------------------
+
+
+def wait_job(client, job_id, timeout=5.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        data = client.get(f"/jobs/{job_id}").json()
+        if data["state"] in ("done", "failed"):
+            return data
+        time.sleep(0.02)
+    raise AssertionError("job did not finish")
+
+
+def post(web_env, path, **data):
+    return web_env.client.post(
+        path, data={"csrf": web_env.app.state.csrf, **data}, follow_redirects=False
+    )
+
+
+def draft_of(web_env, row):
+    return web_env.store.pending_draft_for(row["conversation_id"])
+
+
+def test_post_without_csrf_is_forbidden_on_draft_actions(web_env):
+    row = web_env.arrive("500")
+    d = draft_of(web_env, row)
+    r = web_env.client.post(f"/drafts/{d['id']}/dismiss", follow_redirects=False)
+    assert r.status_code == 403
+    assert web_env.store.draft(d["id"])["status"] == "pending"
+
+
+def test_draft_button_creates_a_draft_via_the_worker(web_env):
+    row = web_env.arrive("501", subject="Plan")
+    r = post(web_env, f"/messages/{row['id']}/draft")
+    assert r.status_code == 303 and r.headers["location"].endswith(f"/messages/{row['id']}")
+    (job,) = web_env.app.state.jobs.for_subject("draft", row["id"])
+    done = wait_job(web_env.client, job.id)
+    assert done["state"] == "done" and done["error"] is None
+    page = web_env.client.get(f"/drafts/{done['result']}")
+    assert page.status_code == 200
+    assert "Sure, Friday works." in page.text and "Friday is fine, thanks." in page.text
+    assert "short confirmation" in page.text and "Plan" in page.text and "Ann" in page.text
+    assert f"/messages/{row['id']}" in page.text
+
+
+def test_message_page_shows_a_running_job_and_a_failed_one(web_env):
+    import threading
+
+    row = web_env.arrive("502")
+    gate = threading.Event()
+    jobs = web_env.app.state.jobs
+    jobs.submit("draft", "Drafting a reply", row["id"], lambda flow: gate.wait(5) and None)
+    jobs.submit("draft", "Drafting a reply", row["id"], lambda flow: None)
+    page = web_env.client.get(f"/messages/{row['id']}").text
+    assert "data-job" in page and "queued" in page
+    gate.set()
+    for j in jobs.for_subject("draft", row["id"]):
+        wait_job(web_env.client, j.id)
+
+    def boom(flow):
+        raise ValueError("model said no <b>")
+
+    failed = jobs.submit("draft", "Drafting a reply", row["id"], boom)
+    wait_job(web_env.client, failed.id)
+    page = web_env.client.get(f"/messages/{row['id']}").text
+    assert "failed" in page and "model said no &lt;b&gt;" in page
+
+
+def test_regenerate_approve_edit_dismiss_from_the_page(web_env):
+    row = web_env.arrive("503")
+    did = draft_of(web_env, row)["id"]
+    r = post(web_env, f"/drafts/{did}/regenerate", comment="warmer please")
+    assert r.status_code == 303
+    (job,) = web_env.app.state.jobs.for_subject("regenerate", did)
+    assert wait_job(web_env.client, job.id)["state"] == "done"
+    page = web_env.client.get(f"/drafts/{did}").text
+    assert "Thanks for the reminder" in page and "warmer please" in page
+    assert "<details" in page
+
+    versions = web_env.store.draft_versions(did)
+    r = post(web_env, f"/drafts/{did}/approve", version_id=str(versions[0]["id"]))
+    assert r.status_code == 303
+    after = web_env.store.draft(did)
+    assert after["status"] == "approved" and after["final_text"] == versions[0]["text"]
+    assert "approved" in web_env.client.get(f"/drafts/{did}").text
+
+    row2 = web_env.arrive("504", subject="other", message_id="<o@x>")
+    d2 = draft_of(web_env, row2)["id"]
+    assert post(web_env, f"/drafts/{d2}/edit", text="My own words").status_code == 303
+    assert web_env.store.draft(d2)["status"] == "edited"
+    assert web_env.store.draft(d2)["final_text"] == "My own words"
+
+    row3 = web_env.arrive("505", subject="third", message_id="<t@x>")
+    d3 = draft_of(web_env, row3)["id"]
+    assert post(web_env, f"/drafts/{d3}/dismiss").status_code == 303
+    assert web_env.store.draft(d3)["status"] == "dismissed"
+
+
+def test_action_on_a_draft_no_longer_pending_shows_the_error(web_env):
+    row = web_env.arrive("506")
+    did = draft_of(web_env, row)["id"]
+    assert post(web_env, f"/drafts/{did}/dismiss").status_code == 303
+    for action, data in (
+        ("approve", {}), ("dismiss", {}), ("edit", {"text": "x"}),
+        ("regenerate", {"comment": "again"}),
+    ):
+        r = post(web_env, f"/drafts/{did}/{action}", **data)
+        assert r.status_code == 200, action
+        assert f"draft {did} is dismissed, not pending" in r.text
+    assert web_env.app.state.jobs.for_subject("regenerate", did) == []
+
+
+def test_unknown_draft_is_404(web_env):
+    assert web_env.client.get("/drafts/999").status_code == 404
+    assert post(web_env, "/drafts/999/dismiss").status_code == 404
+    assert web_env.client.get("/jobs/nope").status_code == 404
+
+
+def test_draft_page_escapes_candidate_text(web_env):
+    row = web_env.arrive("507")
+    did = draft_of(web_env, row)["id"]
+    web_env.store.add_draft_version(
+        did, round=2, candidate=1, origin="local", text="<script>alert(1)</script>",
+        rationale="<img onerror=x>", comment="<b>c</b>",
+    )
+    page = web_env.client.get(f"/drafts/{did}").text
+    assert "<script>alert" not in page and "&lt;script&gt;alert(1)" in page
+    assert "<img onerror" not in page and "&lt;img onerror=x&gt;" in page
+    assert "<b>c</b>" not in page
+
+
+def test_app_js_is_loaded_and_has_job_and_copy_behaviour(web_env):
+    assert 'src="/static/app.js"' in web_env.client.get("/").text
+    js = web_env.client.get("/static/app.js").text
+    assert "data-job" in js and "navigator.clipboard.writeText" in js and "isSecureContext" in js

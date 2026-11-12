@@ -30,6 +30,7 @@
 
 <section class="panel">
   <h2>Reply</h2>
+  {% include "_jobs.html" %}
   {% if draft %}
   <p>A draft is pending: <a href="{{ base }}/drafts/{{ draft.id }}">open draft #{{ draft.id }}</a></p>
   {% else %}
