@@ -20,7 +20,6 @@ def bind_sockets(hosts: Iterable[str], port: int) -> list[socket.socket]:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind((host, port))
             s.listen(128)
-            s.set_inheritable(True)
     except BaseException:
         for s in socks:
             s.close()

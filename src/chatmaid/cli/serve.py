@@ -13,6 +13,9 @@ def _serve_command(args: argparse.Namespace) -> int:
     from chatmaid.web.serve import run
     from chatmaid.web.services import Services
 
+    if args.port is not None and not 1 <= args.port <= 65535:
+        print(f"--port must be from 1 to 65535, got {args.port}", file=sys.stderr)
+        return 2
     try:
         cfg = load_config(Path(args.config))
         if args.port is not None:

@@ -1,18 +1,28 @@
+import dataclasses
+import re
+from datetime import datetime
 from pathlib import Path
 
 import pytest
+from fastapi import Depends
+from fastapi.testclient import TestClient
+
+from chatmaid.cli import main
+from chatmaid.web import app as app_module
+from chatmaid.web.app import _when, check_csrf, create_app
 
 from chatmaid.config import ConfigError, load
 from chatmaid.web.serve import bind_sockets
 
 
 def test_inbox_lists_incoming_mail_and_escapes_it(web_env):
-    web_env.arrive("201", subject="<script>alert(1)</script>", sender="<b>Eve</b> <eve@x.org>")
+    web_env.arrive("201", subject="<script>alert(1)</script>", sender='"<b>Eve</b>" <eve@x.org>')
     r = web_env.client.get("/")
     assert r.status_code == 200
     assert "&lt;script&gt;" in r.text
     assert "<script>alert" not in r.text
-    assert "<b>Eve</b>" not in r.text
+    assert "&lt;b&gt;Eve" in r.text
+    assert "<b>Eve" not in r.text
 
 
 def test_inbox_filters_and_links(web_env):
@@ -31,11 +41,82 @@ def test_inbox_older_link_when_page_is_full(web_env):
     assert "before=" in r.text
 
 
-def test_unknown_host_is_rejected(web_env):
-    r = web_env.client.get("/", headers={"Host": "evil.example"})
-    assert r.status_code == 400
-    assert r.text == "unknown host"
-    assert web_env.client.get("/", headers={"Host": "127.0.0.1:8765"}).status_code == 200
+def _client_allowing(web_env, *hosts):
+    web = dataclasses.replace(web_env.config.web, allowed_hosts=hosts)
+    services = dataclasses.replace(web_env.services, cfg=dataclasses.replace(web_env.config, web=web))
+    return TestClient(create_app(services), base_url="http://127.0.0.1")
+
+
+@pytest.mark.parametrize(
+    "host, status",
+    [
+        ("evil.example", 400),
+        ("127.0.0.1", 200),
+        ("127.0.0.1:8765", 200),
+        ("LOCALHOST", 200),
+        ("[::1]:8765", 200),
+        ("[::1]", 200),
+        ("127.0.0.1.evil.com", 400),
+        ("127.0.0.1.", 400),
+        ("", 400),
+    ],
+)
+def test_host_check(web_env, host, status):
+    client = _client_allowing(web_env, "127.0.0.1", "localhost", "::1")
+    r = client.get("/", headers={"Host": host})
+    assert r.status_code == status
+    if status == 400:
+        assert r.text == "unknown host"
+
+
+def test_responses_forbid_framing(web_env):
+    for r in (
+        web_env.client.get("/"),
+        web_env.client.get("/static/app.css"),
+        web_env.client.get("/", headers={"Host": "evil.example"}),
+    ):
+        assert r.headers["x-frame-options"] == "DENY"
+        csp = r.headers["content-security-policy"]
+        assert "frame-ancestors 'none'" in csp and "form-action 'self'" in csp
+        assert "default-src 'self'" in csp and "base-uri 'none'" in csp
+
+
+def test_templates_have_no_inline_script_or_style():
+    for path in (Path(app_module.__file__).parent / "templates").glob("*.html"):
+        text = path.read_text()
+        assert not re.search(r"<script(?![^>]*\ssrc=)|<style|\sstyle=|\son[a-z]+\s*=", text, re.I), path
+
+
+def test_every_post_route_checks_csrf(web_env):
+    def uses_csrf(dependant):
+        return any(
+            d.call is check_csrf or uses_csrf(d) for d in dependant.dependencies
+        )
+
+    for route in web_env.app.routes:
+        if "POST" in getattr(route, "methods", ()):
+            assert uses_csrf(route.dependant), route.path
+
+
+def test_post_without_valid_token_is_forbidden(web_env):
+    @web_env.app.post("/_probe", dependencies=[Depends(check_csrf)])
+    def probe():
+        return {"ok": True}
+
+    c = web_env.client
+    assert c.post("/_probe").status_code == 403
+    assert c.post("/_probe", data={"csrf": "nope"}).status_code == 403
+    assert c.post("/_probe", data={"csrf": web_env.app.state.csrf}).status_code == 200
+
+
+def test_when_filter_uses_local_time_and_dashes_missing():
+    assert _when(None) == "\u2014" and _when(0) == "\u2014"
+    assert _when(1_700_000_000) == datetime.fromtimestamp(1_700_000_000).astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def test_serve_rejects_bad_port(capsys):
+    assert main(["serve", "--port", "70000"]) == 2
+    assert "--port" in capsys.readouterr().err
 
 
 def test_static_assets_are_served(web_env):
