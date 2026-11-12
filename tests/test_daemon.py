@@ -312,3 +312,18 @@ def test_stop_mid_scan_keeps_body_wait_counters(watch_env):
     pending = watch_env.store.get_checkpoint("watch", "evolution")["_pending"]
     assert sorted(pending) == keys  # the unprocessed ref's counter is carried over, not dropped
     assert sorted(pending.values()) == [1, 2]
+
+
+def test_after_scan_runs_after_each_trigger_and_its_errors_are_contained(watch_env):
+    env = watch_env
+    seen = []
+    env.watcher.after_scan = lambda: seen.append(1)
+    env.watcher.handle_trigger("timer")
+    env.watcher.handle_trigger("dbus")
+    assert seen == [1, 1]
+
+    def boom():
+        raise RuntimeError("retry failed")
+
+    env.watcher.after_scan = boom
+    env.watcher.handle_trigger("timer")  # must not raise

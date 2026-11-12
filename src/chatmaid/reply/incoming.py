@@ -1,12 +1,32 @@
 """Routine B: triage an incoming message and draft a reply."""
 
-from chatmaid.model import NormalizedMessage
+from chatmaid.model import NormalizedMessage, SourceRef
 from chatmaid.reply.context import build_context
 from chatmaid.reply.drafting import draft_reply
 from chatmaid.triage.classify import triage_message
 
 
 class IncomingMixin:
+    def retry_untriaged(self, *, limit: int = 20) -> int:
+        """Give watched messages the model failed on another go; returns how many got triaged."""
+        store = self.store
+        since = self.now() - self.cfg.draft.max_age_days * 86400
+        done = 0
+        for row in store.untriaged_incoming(since=since, limit=limit):
+            ref = row["ref_key"]
+            try:
+                msg = self.connector.fetch(SourceRef.from_key(ref))
+            except KeyError:
+                store.log_event(
+                    "reply", "draft_failed", ref,
+                    {"error": "gone from the mail store", "message_id": row["id"]},
+                )
+                continue
+            self.dispatch("incoming", row["conversation_id"], msg)
+            if store.triage_for(row["id"]) is not None:
+                done += 1
+        return done
+
     def on_incoming(self, conversation_id: int, msg: NormalizedMessage) -> int | None:
         store, cfg = self.store, self.cfg
         ref = msg.ref.key()

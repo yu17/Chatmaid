@@ -398,3 +398,76 @@ def test_sent_mail_after_ui_approval_records_the_outcome(flow_env):
     assert d["outcome_ref"] == sent["ref_key"]
     assert d["outcome_preview"] == "Friday works."
     assert "draft_outcome" in kinds(env)
+
+
+def _fail_triage(env):
+    env.llm.fail_next(1)  # the triage call is the first model call for a needs-reply message
+
+
+def test_untriaged_incoming_skips_init_messages_answered_threads_and_spent_attempts(flow_env):
+    env = flow_env
+    _fail_triage(env)
+    failed = env.arrive("100")
+    ref = failed["ref_key"]
+    assert env.store.triage_for(failed["id"]) is None
+    assert [r["id"] for r in env.store.untriaged_incoming(since=0)] == [failed["id"]]
+    assert env.store.untriaged_incoming(since=failed["sent_at"] + 1) == []  # too old
+    # a message init indexed has no `incoming` event
+    env.store._conn.execute("DELETE FROM event_log WHERE kind = 'incoming'")
+    assert env.store.untriaged_incoming(since=0) == []
+    env.store.log_event("evolution", "incoming", ref, {})
+    assert len(env.store.untriaged_incoming(since=0)) == 1
+    # spent attempts: the arrival's own failure counts as one
+    env.store.log_event("reply", "draft_failed", ref, {})
+    assert len(env.store.untriaged_incoming(since=0)) == 1
+    env.store.log_event("reply", "draft_failed", ref, {})
+    assert env.store.untriaged_incoming(since=0) == []
+    assert len(env.store.untriaged_incoming(since=0, max_attempts=4)) == 1
+    # an owner reply later in the thread answers it
+    env.store._conn.execute("DELETE FROM event_log WHERE kind = 'draft_failed'")
+    env.arrive(
+        "200", sender="me@x.org", to="ann@x.org", folder=SENT, body="Friday works.",
+        in_reply_to=failed["message_id"], date=1_700_000_900,
+    )
+    assert env.store.untriaged_incoming(since=0) == []
+
+
+def test_retry_untriaged_triages_after_the_model_recovers(flow_env):
+    env = flow_env
+    _fail_triage(env)
+    row = env.arrive("100")
+    assert env.store.triage_for(row["id"]) is None
+    assert kinds(env).count("draft_failed") == 1
+    assert env.flow.retry_untriaged() == 1
+    assert env.store.triage_for(row["id"])["category"] == "needs_reply"
+    assert len(env.store.drafts(status=None)) == 1
+    assert env.flow.retry_untriaged() == 0
+
+
+def test_retry_gives_up_after_three_failures(flow_env):
+    env = flow_env
+    _fail_triage(env)
+    row = env.arrive("100")
+    env.llm.fail_next(10)
+    assert env.flow.retry_untriaged() == 0
+    assert env.flow.retry_untriaged() == 0
+    assert kinds(env).count("draft_failed") == 3
+    env.llm.fail_next(0)
+    assert env.flow.retry_untriaged() == 0
+    assert env.store.triage_for(row["id"]) is None
+
+
+def test_retry_logs_a_message_gone_from_the_mail_store(flow_env, monkeypatch):
+    env = flow_env
+    _fail_triage(env)
+    row = env.arrive("100")
+
+    def gone(ref):
+        raise KeyError(ref.key())
+
+    monkeypatch.setattr(env.connector, "fetch", gone)
+    assert env.flow.retry_untriaged() == 0
+    ev = [e for e in env.store.events(limit=50) if e["kind"] == "draft_failed"][0]
+    assert json.loads(ev["payload_json"]) == {
+        "error": "gone from the mail store", "message_id": row["id"],
+    }

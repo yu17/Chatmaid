@@ -1037,6 +1037,26 @@ class Store:
             (_now(), source, kind, ref, json.dumps(payload, ensure_ascii=False)),
         ).lastrowid
 
+    def untriaged_incoming(
+        self, *, since: int, max_attempts: int = 3, limit: int = 50
+    ) -> list[sqlite3.Row]:
+        """Watched incoming messages with no triage yet, newest first, for another attempt."""
+        return self._conn.execute(
+            """
+            SELECT m.* FROM message m
+            WHERE m.is_owner = 0 AND m.sent_at >= ?
+              AND EXISTS (SELECT 1 FROM event_log e WHERE e.source = 'evolution'
+                          AND e.kind = 'incoming' AND e.ref = m.ref_key)
+              AND NOT EXISTS (SELECT 1 FROM triage t WHERE t.message_id = m.id)
+              AND NOT EXISTS (SELECT 1 FROM message o WHERE o.conversation_id = m.conversation_id
+                              AND o.is_owner = 1 AND o.sent_at > m.sent_at)
+              AND (SELECT COUNT(*) FROM event_log f WHERE f.source = 'reply'
+                   AND f.kind = 'draft_failed' AND f.ref = m.ref_key) < ?
+            ORDER BY m.sent_at DESC, m.id DESC LIMIT ?
+            """,
+            (since, max_attempts, limit),
+        ).fetchall()
+
     def events(self, *, limit: int = 100) -> list[sqlite3.Row]:
         return self._conn.execute(
             "SELECT * FROM event_log ORDER BY id DESC LIMIT ?", (limit,)

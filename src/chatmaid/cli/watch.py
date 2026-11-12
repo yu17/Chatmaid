@@ -59,6 +59,9 @@ def _watch_locked(args: argparse.Namespace, cfg) -> int:
                 flow.dispatch(kind, cid, msg)
 
         watcher.on_routed = show
+        if not args.no_draft:
+            flow.retry_untriaged()
+            watcher.after_scan = flow.retry_untriaged
         dbus = "off" if args.no_dbus else "on"
         print(f"watching {len(accounts)} accounts (interval {args.interval}s, dbus {dbus})", flush=True)
         asyncio.run(_watch(watcher))

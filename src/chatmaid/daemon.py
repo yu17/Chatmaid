@@ -26,6 +26,7 @@ class Watcher:
         self.connector = connector
         self.events = events
         self.on_routed: Callable[[str, int, NormalizedMessage], None] | None = None
+        self.after_scan: Callable[[], object] | None = None  # runs after every trigger
         # set by `run` when asked to stop mid-scan: `_handle` finishes the message in hand,
         # keeps the rest for the next start and returns (ruling R18)
         self.stop_requested = threading.Event()
@@ -85,6 +86,16 @@ class Watcher:
         except Exception:
             log.exception("trigger %r failed", kind)
             return 0
+        finally:
+            self._run_after_scan()
+
+    def _run_after_scan(self) -> None:
+        if self.after_scan is None:
+            return
+        try:
+            self.after_scan()
+        except Exception:
+            log.exception("after-scan hook failed")
 
     def _handle(self, kind: str) -> int:
         state, pending = self._load_state()
