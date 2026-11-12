@@ -496,3 +496,30 @@ def test_retry_contains_a_non_llm_error_and_stops_after_three_attempts(flow_env,
     env.flow.retry_untriaged()
     assert env.flow.retry_untriaged() == 0
     assert env.store.untriaged_incoming(since=0) == []  # three attempts spent
+
+
+def test_draft_for_message_drafts_without_triage(flow_env):
+    env = flow_env
+    env.llm.responses["triage"] = '{"category":"informational","tier":"work","reason":"fyi"}'
+    row = env.arrive("100")
+    assert env.store.drafts(status=None) == []
+    did = env.flow.draft_for_message(row["id"])
+    d = env.store.draft(did)
+    assert d["status"] == "pending" and d["message_id"] == row["id"]
+    assert len(env.store.draft_versions(did)) == 2
+    assert env.store.triage_for(row["id"])["category"] == "informational"  # unchanged
+    ev = [e for e in env.store.events(limit=50) if e["kind"] == "draft"][0]
+    assert json.loads(ev["payload_json"]) == {"draft_id": did, "candidates": 2, "on_demand": True}
+    again = env.flow.draft_for_message(row["id"])  # supersedes the pending one
+    assert env.store.draft(did)["status"] == "superseded"
+    assert env.store.pending_draft_for(row["conversation_id"])["id"] == again
+
+
+def test_draft_for_message_rejects_owner_messages(flow_env):
+    env = flow_env
+    env.arrive("100")
+    own = owner_reply(env, "200", "Friday works", "<m100@x>")
+    with pytest.raises(ValueError):
+        env.flow.draft_for_message(own["id"])
+    with pytest.raises(ValueError):
+        env.flow.draft_for_message(99999)

@@ -6,6 +6,7 @@ import sys
 
 from pathlib import Path
 
+from chatmaid import views
 from chatmaid.cli import common
 from chatmaid.config import ConfigError
 from chatmaid.config import load as load_config
@@ -160,13 +161,12 @@ def _status_command(args: argparse.Namespace) -> int:
     cfg = load_config(Path(args.config))
     store = common.open_store(cfg)
     try:
-        for name, n in store.counts().items():
+        view = views.status_view(store, max_age_days=cfg.draft.max_age_days)
+        for name, n in view["counts"].items():
             print(f"{name}={n}")
-        with_summary = len(store.conversations(needing_summary=False, exclude_bulk=False))
-        without = len(store.conversations(needing_summary=True, exclude_bulk=False))
-        print(f"conversations_with_summary={with_summary}")
-        print(f"conversations_without_summary={without}")
-        for name, n in store.category_counts().items():
+        print(f"conversations_with_summary={view['with_summary']}")
+        print(f"conversations_without_summary={view['without_summary']}")
+        for name, n in view["categories"].items():
             print(f"category_{name}={n}")
     finally:
         store.close()

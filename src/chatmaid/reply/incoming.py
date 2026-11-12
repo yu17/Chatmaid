@@ -65,6 +65,23 @@ class IncomingMixin:
         if t.category != "needs_reply":
             return None
 
+        return self._create_draft(conversation_id, row, msg)
+
+    def draft_for_message(self, message_id: int) -> int:
+        """Draft a reply to any stored incoming message, whatever its triage says."""
+        row = self.store.message(message_id)
+        if row is None:
+            raise ValueError(f"no message {message_id}")
+        if row["is_owner"]:
+            raise ValueError(f"message {message_id} is the owner's own")
+        msg = self.connector.fetch(SourceRef.from_key(row["ref_key"]))
+        return self._create_draft(row["conversation_id"], row, msg, on_demand=True)
+
+    def _create_draft(
+        self, conversation_id: int, row, msg: NormalizedMessage, *, on_demand: bool = False
+    ) -> int:
+        store, cfg = self.store, self.cfg
+        ref = msg.ref.key()
         ctx = build_context(
             store, self.connector, self.llm, cfg, conversation_id, msg, now=self.now()
         )
@@ -83,7 +100,8 @@ class IncomingMixin:
                     draft_id, round=1, candidate=i, origin="local", text=c.text,
                     rationale=c.rationale,
                 )
-            store.log_event(
-                "reply", "draft", ref, {"draft_id": draft_id, "candidates": len(cands)}
-            )
+            payload = {"draft_id": draft_id, "candidates": len(cands)}
+            if on_demand:
+                payload["on_demand"] = True
+            store.log_event("reply", "draft", ref, payload)
         return draft_id

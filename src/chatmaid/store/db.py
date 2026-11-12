@@ -517,6 +517,54 @@ class Store:
         params.append(limit)
         return self._conn.execute(sql, params).fetchall()
 
+    _INBOX_SELECT = (
+        "SELECT m.id AS message_id, m.conversation_id, m.sent_at, m.subject, m.account, "
+        "COALESCE(NULLIF(i.display_name, ''), i.address, '?') AS sender, "
+        "t.category AS triage, c.category AS category, "
+        "(SELECT d.id FROM draft d WHERE d.conversation_id = m.conversation_id "
+        "AND d.status = 'pending' ORDER BY d.id DESC LIMIT 1) AS draft_id "
+        "FROM message m LEFT JOIN identity i ON i.id = m.sender_identity_id "
+        "LEFT JOIN triage t ON t.message_id = m.id "
+        "LEFT JOIN conversation c ON c.id = m.conversation_id "
+    )
+
+    def inbox_rows(
+        self, *, filter: str = "default", before: int | None = None, limit: int = 50
+    ) -> list[sqlite3.Row]:
+        """Incoming messages, newest first; filter is default, all, needs_reply, drafts or a category."""
+        where = ["m.is_owner = 0"]
+        params: list = []
+        if before is not None:
+            where.append("m.sent_at < ?")
+            params.append(before)
+        if filter == "default":
+            where.append("COALESCE(c.category, '') != 'promotional'")
+        elif filter == "needs_reply":
+            where.append("t.category = 'needs_reply'")
+        elif filter == "drafts":
+            where.append(
+                "EXISTS (SELECT 1 FROM draft d WHERE d.conversation_id = m.conversation_id "
+                "AND d.status = 'pending')"
+            )
+        elif filter != "all":
+            where.append("c.category = ?")
+            params.append(filter)
+        sql = self._INBOX_SELECT + "WHERE " + " AND ".join(where)
+        sql += " ORDER BY m.sent_at DESC, m.id DESC LIMIT ?"
+        return self._conn.execute(sql, [*params, limit]).fetchall()
+
+    def conversation_messages(
+        self, conversation_id: int, *, before: int | None = None, limit: int = 50
+    ) -> list[sqlite3.Row]:
+        """A conversation's messages in the inbox row shape, newest first."""
+        sql = self._INBOX_SELECT + "WHERE m.conversation_id = ?"
+        params: list = [conversation_id]
+        if before is not None:
+            sql += " AND m.sent_at < ?"
+            params.append(before)
+        sql += " ORDER BY m.sent_at DESC, m.id DESC LIMIT ?"
+        return self._conn.execute(sql, [*params, limit]).fetchall()
+
     def search_messages(
         self,
         *,
@@ -1057,9 +1105,12 @@ class Store:
             (since, max_attempts, limit),
         ).fetchall()
 
-    def events(self, *, limit: int = 100) -> list[sqlite3.Row]:
+    def events(
+        self, *, limit: int = 100, kinds: tuple[str, ...] | None = None
+    ) -> list[sqlite3.Row]:
+        where = f" WHERE kind IN ({','.join('?' * len(kinds))})" if kinds else ""
         return self._conn.execute(
-            "SELECT * FROM event_log ORDER BY id DESC LIMIT ?", (limit,)
+            f"SELECT * FROM event_log{where} ORDER BY id DESC LIMIT ?", (*(kinds or ()), limit)
         ).fetchall()
 
     def counts(self) -> dict[str, int]:

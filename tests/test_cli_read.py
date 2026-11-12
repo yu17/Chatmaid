@@ -173,3 +173,12 @@ def test_cli_lookup_without_token_falls_back_to_full_text(cli_env, capsys, monke
     assert main([*cfg, "lookup", "hello"]) == 0
     captured = capsys.readouterr()
     assert "falling back to full-text search only" in captured.err and "[hello]" in captured.out.lower()
+
+
+def test_status_cli_output_unchanged(cli_env, capsys):
+    assert main(["--config", str(cli_env.config_path), "status"]) == 0
+    assert capsys.readouterr().out == (
+        "identities=5\ncontacts=5\nconversations=5\nmessages=6\nmemories=0\nembeddings=7\n"
+        "events=0\ndrafts=0\ncloud_calls=0\nsenders=3\nconversations_with_summary=4\n"
+        "conversations_without_summary=1\ncategory_conversation=4\n"
+    )
